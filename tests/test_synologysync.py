@@ -15,7 +15,7 @@ from beets import config, ui
 from beets.dbcore import types
 from beets.library import Item, Library
 from beets.plugins import BeetsPlugin
-from beetsplug._synology import AudioStation, SynologyError
+from beetsplug._synology import AudioStation, SynologyError, _conceal_sensitive, _is_sensitive_key
 from beetsplug._synology_playlists import OwnerAliases, decode_name, encode_name
 from beetsplug.playlist import PlaylistPlugin, PlaylistQuery
 from beetsplug.synologysync import PathMapping, SynologySyncPlugin, _playlist_name
@@ -260,6 +260,58 @@ class ClientTest(unittest.TestCase):
             with self.assertRaisesRegex(SynologyError, "^AudioStation HTTPS request failed$"):
                 AudioStation("https://nas", "user", "sensitive-value")
         build.return_value.close.assert_called_once()
+
+    def test_api_calls_are_logged_and_sensitive_data_concealed(self):
+        pool = Mock()
+        pool.request.side_effect = [
+            Mock(status=200, data=json.dumps({"success": True, "data": {
+                "SYNO.API.Auth": {"path": "auth.cgi", "minVersion": 1, "maxVersion": 7},
+                "SYNO.AudioStation.Song": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+            }}).encode()),
+            Mock(status=200, data=b'{"success":true,"data":{"sid":"super-secret-token"}}'),
+            Mock(status=200, data=b'{"success":true,"data":{"songs":[],"total":0}}'),
+            Mock(status=200, data=b'{"success":true}'),
+        ]
+        log_mock = Mock()
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool", return_value=pool):
+            client = AudioStation("https://nas:5001", "user", "secret-password", log=log_mock)
+            list(client.songs())
+            client.close()
+
+        info_calls = log_mock.info.call_args_list
+        all_logged_text = " ".join(str(call) for call in info_calls)
+
+        self.assertNotIn("secret-password", all_logged_text)
+        self.assertNotIn("super-secret-token", all_logged_text)
+
+        self.assertIn("Calling AudioStation API: SYNO.API.Info", all_logged_text)
+        self.assertIn("Calling AudioStation API: SYNO.API.Auth", all_logged_text)
+        self.assertIn("Calling AudioStation API: SYNO.AudioStation.Song", all_logged_text)
+        self.assertIn("'passwd': '***'", all_logged_text)
+        self.assertIn("'_sid': '***'", all_logged_text)
+
+    def test_sensitive_concealment_helpers(self):
+        for key in ("passwd", "password", "my_password", "token", "_sid", "sid", "secret", "credentials"):
+            self.assertTrue(_is_sensitive_key(key), f"Expected {key} to be sensitive")
+        for key in ("account", "api", "method", "offset", "limit", "song_rating_meq", "id", "songs"):
+            self.assertFalse(_is_sensitive_key(key), f"Expected {key} not to be sensitive")
+
+        data = {
+            "account": "alice",
+            "passwd": "secret-pass",
+            "_sid": "token123",
+            "nested": {"password": "pass2", "regular": "val"},
+            "items": [{"api_key": "key1", "name": "track"}],
+        }
+        concealed = _conceal_sensitive(data)
+        self.assertEqual(concealed["account"], "alice")
+        self.assertEqual(concealed["passwd"], "***")
+        self.assertEqual(concealed["_sid"], "***")
+        self.assertEqual(concealed["nested"]["password"], "***")
+        self.assertEqual(concealed["nested"]["regular"], "val")
+        self.assertEqual(concealed["items"][0]["api_key"], "***")
+        self.assertEqual(concealed["items"][0]["name"], "track")
+        self.assertEqual(data["passwd"], "secret-pass")
 
 
 class PluginTest(unittest.TestCase):
