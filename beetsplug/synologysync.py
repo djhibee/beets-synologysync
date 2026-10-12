@@ -332,6 +332,8 @@ class SynologySyncPlugin(BeetsPlugin):
                     raise ui.UserError(f"Ambiguous mapped beets path: {remote_path}")
                 paths[remote_path] = os.path.abspath(os.fsdecode(item.path))
         for name, playlist in remote.items():
+            if name in local and opts.conflict == "skip":
+                continue
             entries = []
             for song in client.playlist_songs(playlist["id"]):
                 path = paths.get(song_path(song))
@@ -354,8 +356,14 @@ class SynologySyncPlugin(BeetsPlugin):
         for name, path in local.items():
             if opts.playlist and name != opts.playlist:
                 continue
+            existing = remote.get(name)
+            if existing and opts.conflict == "skip":
+                continue
             entries = [entry for entry in self._read_playlist(path, base) if entry in selected]
             if not entries and queried:
+                continue
+            policy = self._conflict(opts, name, existing is not None)
+            if policy == "skip":
                 continue
             ids = []
             for entry in entries:
@@ -363,10 +371,6 @@ class SynologySyncPlugin(BeetsPlugin):
                 if song is None:
                     raise ui.UserError(f"No mapped AudioStation song for {entry}")
                 ids.append(song["id"])
-            existing = remote.get(name)
-            policy = self._conflict(opts, name, existing is not None)
-            if policy == "skip":
-                continue
             if policy == "merge" and existing:
                 ids = _unique(
                     [song["id"] for song in client.playlist_songs(existing["id"])] + ids

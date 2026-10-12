@@ -206,6 +206,31 @@ class PluginTest(unittest.TestCase):
         self.plugin.sync_playlists(self.lib, self.options(arguments=("--conflict=skip",)), [])
         self.assertEqual(self.plugin._read_playlist(path, self.playlists), [os.fsdecode(self.two.path)])
 
+    def test_playlist_skip_does_not_fetch_incoming_membership(self):
+        path = os.path.join(self.playlists, "favourites.m3u")
+        self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.two.path)])
+        self.client.playlist_songs.side_effect = SynologyError("Unreadable playlist")
+        self.plugin.sync_playlists(self.lib, self.options(arguments=("--conflict=skip",)), [])
+        self.client.playlist_songs.assert_not_called()
+
+    def test_export_skip_does_not_read_or_map_source(self):
+        path = os.path.join(self.playlists, "favourites.m3u")
+        self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.one.path)])
+        self.client.songs.return_value = []
+        with patch.object(self.plugin, "_read_playlist", side_effect=OSError("Unreadable")):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--conflict=skip")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_interactive_export_skip_does_not_map_source(self):
+        path = os.path.join(self.playlists, "favourites.m3u")
+        self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.one.path)])
+        self.client.songs.return_value = []
+        with patch("beetsplug.synologysync.ui.input_options", return_value="s"):
+            self.plugin.sync_playlists(self.lib, self.options(arguments=("--dest=syno",)), [])
+        self.client.save_playlist.assert_not_called()
+
     def test_no_matches_does_not_connect_or_overwrite(self):
         self.plugin.sync_playlists(self.lib, self.options(), ["title:missing"])
         self.password.assert_not_called()
