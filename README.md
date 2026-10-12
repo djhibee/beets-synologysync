@@ -35,6 +35,7 @@ synologysync:
   library: all      # all | personal | shared: playlist selection
   playlist_library: personal  # personal | shared: new unprefixed playlists
   timeout: 30
+  # SingleAPICallThreshold: 100
   # ca_file: /home/alice/nas-ca.pem
 
 playlist:
@@ -129,6 +130,15 @@ are rounded up as usual. Zero is a valid filter in either direction.
 Any positional beets query further restricts the selection. Existing conflict
 handling and `--force` still apply. This filters ratings; it does not assign a
 new rating to otherwise unmatched songs.
+
+When querying a small number of items, fetching and indexing the entire AudioStation
+library is unnecessary. If a beets query is provided and matches fewer items than
+`SingleAPICallThreshold` (default `100`), the plugin avoids indexing all songs in
+AudioStation. Instead, it queries AudioStation for each item by searching for its
+filename (`method=search` with `keyword=<filename>`) and filters the returned
+candidates by mapped path. When running without a query (targeting the entire library)
+or when the query result size meets or exceeds `SingleAPICallThreshold`, the plugin
+fetches and indexes all songs in AudioStation once using a global query.
 
 ## Playlists
 

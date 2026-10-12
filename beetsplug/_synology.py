@@ -6,11 +6,53 @@ import ssl
 from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import getproxies, proxy_bypass
 
+from beets import logging
 import urllib3
 
 
 class SynologyError(Exception):
     pass
+
+
+def _is_sensitive_key(key):
+    k = str(key).lower()
+    return (
+        k in (
+            "_sid",
+            "sid",
+            "passwd",
+            "password",
+            "pass",
+            "token",
+            "session_token",
+            "auth_token",
+            "secret",
+            "key",
+            "api_key",
+            "apikey",
+            "credential",
+            "credentials",
+        )
+        or "passwd" in k
+        or "password" in k
+        or "token" in k
+        or "secret" in k
+        or "credential" in k
+    )
+
+
+def _conceal_sensitive(params):
+    if isinstance(params, dict):
+        concealed = {}
+        for k, v in params.items():
+            if _is_sensitive_key(k):
+                concealed[k] = "***"
+            else:
+                concealed[k] = _conceal_sensitive(v)
+        return concealed
+    if isinstance(params, list):
+        return [_conceal_sensitive(item) for item in params]
+    return params
 
 
 def _https_url(url, name):
@@ -36,7 +78,20 @@ def _https_url(url, name):
 
 
 class AudioStation:
-    def __init__(self, url, username, password, ca_file=None, timeout=30, public_url=None):
+    log = logging.getLogger("beets.synologysync")
+
+    def __init__(
+        self,
+        url,
+        username,
+        password,
+        ca_file=None,
+        timeout=30,
+        public_url=None,
+        log=None,
+    ):
+        if log is not None:
+            self.log = log
         parts = _https_url(url, "url")
         identity = _https_url(public_url, "public_url") if public_url else parts
         if public_url and identity.path not in ("", "/"):
@@ -114,6 +169,17 @@ class AudioStation:
             or urlsplit(path).fragment
         ):
             raise SynologyError("Invalid AudioStation API path")
+        api = params.get("api", path) if isinstance(params, dict) else path
+        method = params.get("method", "") if isinstance(params, dict) else ""
+        concealed = _conceal_sensitive(params)
+        if method:
+            self.log.info(
+                f"Calling AudioStation API: {api} ({method}) with params: {concealed}"
+            )
+        else:
+            self.log.info(
+                f"Calling AudioStation API: {api} with params: {concealed}"
+            )
         try:
             response = self.pool.request(
                 "POST",
@@ -130,11 +196,27 @@ class AudioStation:
                 raise SynologyError("AudioStation HTTPS request failed")
             payload = json.loads(response.data)
         except (urllib3.exceptions.HTTPError, OSError, ValueError):
+            if method:
+                self.log.warning(
+                    f"AudioStation HTTPS request failed for {api} ({method})"
+                )
+            else:
+                self.log.warning(
+                    f"AudioStation HTTPS request failed for {api}"
+                )
             # Do not expose requests containing credentials or session tokens.
             raise SynologyError("AudioStation HTTPS request failed") from None
         if not isinstance(payload, dict) or not payload.get("success"):
             error = payload.get("error", {}) if isinstance(payload, dict) else {}
             code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
+            if method:
+                self.log.warning(
+                    f"AudioStation API error ({code}) for {api} ({method})"
+                )
+            else:
+                self.log.warning(
+                    f"AudioStation API error ({code}) for {api}"
+                )
             raise SynologyError(f"AudioStation API error ({code})")
         return payload.get("data", {})
 
@@ -165,13 +247,18 @@ class AudioStation:
             if not entries or offset >= data.get("total", offset):
                 break
 
-    def songs(self, rating=None):
+    def songs(self, rating=None, keyword=None):
         filters = {}
         if rating is not None:
             filters = {"song_rating_meq": rating, "song_rating_leq": rating}
+        if keyword is not None:
+            filters["keyword"] = keyword
+            method = "search"
+        else:
+            method = "list"
         return self._list(
             "SYNO.AudioStation.Song",
-            "list",
+            method,
             "songs",
             library="all",
             additional="song_rating",

@@ -67,6 +67,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 "timeout": 30,
                 "library": "all",
                 "playlist_library": "personal",
+                "SingleAPICallThreshold": 100,
             }
         )
 
@@ -115,6 +116,23 @@ class SynologySyncPlugin(BeetsPlugin):
             raise ui.UserError("synologysync.force must be no, rating, playlist, or yes")
         return opts.force or value in (kind, "yes")
 
+    def _single_api_call_threshold(self):
+        for key in (
+            "SingleAPICallThreshold",
+            "single_api_call_threshold",
+            "singleapicallthreshold",
+        ):
+            if key in self.config:
+                val = self.config[key].get()
+                if val is not None:
+                    try:
+                        return int(val)
+                    except (TypeError, ValueError):
+                        raise ui.UserError(
+                            f"synologysync.{key} must be an integer"
+                        ) from None
+        return 100
+
     def _username(self, opts):
         username = opts.synouser or self.config["synouser"].get(str)
         if username:
@@ -136,17 +154,20 @@ class SynologySyncPlugin(BeetsPlugin):
         if not url:
             raise ui.UserError("Set synologysync.host or --url")
         client = None
+        password = getpass.getpass("AudioStation password: ")
+        self._log.info("Connecting to AudioStation...")
         try:
             client = AudioStation(
                 url,
                 username,
-                getpass.getpass("AudioStation password: "),
+                password,
                 ca_file=self.config["ca_file"].as_filename()
                 if self.config["ca_file"].get(str)
                 else None,
                 timeout=self.config["timeout"].get(float),
                 public_url=self.config["public_url"].get(str) or None,
             )
+            self._log.info("Connected to AudioStation")
             yield client
         except (SynologyError, OSError, ValueError) as exc:
             raise ui.UserError(str(exc)) from None
@@ -167,12 +188,20 @@ class SynologySyncPlugin(BeetsPlugin):
 
     def _song_index(self, client, rating=None):
         songs = {}
+        self._log.info("Fetching songs from AudioStation...")
         entries = client.songs() if rating is None else client.songs(rating=rating)
-        for song in entries:
+        for count, song in enumerate(entries, 1):
+            if count % 1000 == 0:
+                self._log.info("Fetched {} songs from AudioStation...", count)
             path = song_path(song)
             if path in songs and songs[path]["id"] != song["id"]:
                 raise ui.UserError(f"Ambiguous AudioStation song path: {path}")
             songs[path] = song
+        self._log.info("Indexed {} songs from AudioStation", len(songs))
+        if songs:
+            self._log.debug(
+                "Sample AudioStation song paths: {}", list(songs.keys())[:5]
+            )
         return songs
 
     def _plugin(self, name):
@@ -212,6 +241,7 @@ class SynologySyncPlugin(BeetsPlugin):
             raise ui.UserError(str(exc)) from None
         force = self._force(opts, "rating")
         mapping = self._mapping()
+        threshold = self._single_api_call_threshold()
         items = list(lib.items(ui.decargs(args)))
         if rating is not None and opts.dest == "syno":
             try:
@@ -229,12 +259,65 @@ class SynologySyncPlugin(BeetsPlugin):
             remote_filter = (
                 rating // 2 if rating is not None and opts.dest == "beet" else None
             )
-            songs = self._song_index(client, rating=remote_filter)
-            for item in items:
-                song = songs.get(mapping.to_syno(item.path))
-                if song is None:
+            use_global = not args or len(items) >= threshold
+            if use_global:
+                songs = self._song_index(client, rating=remote_filter)
+            else:
+                songs = None
+            total = len(items)
+            for idx, item in enumerate(items, 1):
+                self._log.info("Processing song ({}/{}): {}", idx, total, item.path)
+                syno_path = mapping.to_syno(item.path)
+                if syno_path is None:
+                    self._log.debug(
+                        "Local path '{}' does not match any configured path_mapping",
+                        item.path,
+                    )
                     if remote_filter is None:
-                        self._log.warning("No mapped AudioStation song for {}", item.path)
+                        self._log.warning(
+                            "No mapped AudioStation song for {}: path does not match any path_mapping",
+                            item.path,
+                        )
+                    continue
+                if songs is not None:
+                    song = songs.get(syno_path)
+                else:
+                    filename = os.path.basename(os.fsdecode(item.path))
+                    song = None
+                    for candidate in client.songs(
+                        keyword=filename, rating=remote_filter
+                    ):
+                        if song_path(candidate) == syno_path:
+                            if song is not None and song["id"] != candidate["id"]:
+                                raise ui.UserError(
+                                    f"Ambiguous AudioStation song path: {syno_path}"
+                                )
+                            song = candidate
+                if song is None:
+                    if songs is not None:
+                        self._log.debug(
+                            "Mapped path '{}' not found in AudioStation ({} songs indexed)",
+                            syno_path,
+                            len(songs),
+                        )
+                    else:
+                        self._log.debug(
+                            "Mapped path '{}' not found in AudioStation for keyword '{}'",
+                            syno_path,
+                            os.path.basename(os.fsdecode(item.path)),
+                        )
+                    if remote_filter is None:
+                        self._log.warning(
+                            "No mapped AudioStation song for {}: mapped path '{}' not found in AudioStation",
+                            item.path,
+                            syno_path,
+                        )
+                    else:
+                        self._log.debug(
+                            "Song not found with remote filter rating={}: {}",
+                            remote_filter,
+                            syno_path,
+                        )
                     continue
                 try:
                     ratings = as_ratings(item.get("userrating"))
@@ -250,12 +333,22 @@ class SynologySyncPlugin(BeetsPlugin):
                 if opts.dest == "beet":
                     source, destination = remote * 2, local
                     if rating is not None and source != rating:
+                        self._log.debug(
+                            "Skipping {}: source rating {} != filter rating {}",
+                            item.path,
+                            source,
+                            rating,
+                        )
                         continue
                 else:
                     if local is None:
+                        self._log.debug("No local rating for {}: skipping", item.path)
                         continue
                     source, destination = (local + 1) // 2, remote
                 if source == destination:
+                    self._log.debug(
+                        "Rating already in sync for {}: {}", item.path, destination
+                    )
                     continue
                 if destination is not None and not force:
                     self._log.info("Rating exists for {}: {}", item.path, destination)
@@ -496,9 +589,16 @@ class SynologySyncPlugin(BeetsPlugin):
                 continue
             ids = []
             for entry in entries:
-                song = songs.get(mapping.to_syno(entry))
+                syno_path = mapping.to_syno(entry)
+                song = songs.get(syno_path) if syno_path else None
                 if song is None:
-                    raise ui.UserError(f"No mapped AudioStation song for {entry}")
+                    if syno_path is None:
+                        raise ui.UserError(
+                            f"No mapped AudioStation song for {entry}: path does not match any path_mapping"
+                        )
+                    raise ui.UserError(
+                        f"No mapped AudioStation song for {entry}: mapped path '{syno_path}' not found in AudioStation"
+                    )
                 ids.append(song["id"])
             if policy == "merge" and existing:
                 ids = _unique(
