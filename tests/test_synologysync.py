@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import confuse
 
@@ -206,6 +206,17 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(call.args, ("SYNO.AudioStation.Song", "search"))
             self.assertEqual(call.kwargs["title"], "Irreplaceable")
             self.assertNotIn("keyword", call.kwargs)
+
+    def test_album_and_artist_search_filters(self):
+        for field in ("album", "artist"):
+            with self.subTest(field=field):
+                client = AudioStation.__new__(AudioStation)
+                client.call = Mock(return_value={"songs": [], "total": 0})
+                list(client.songs(**{field: "X"}))
+                args, kwargs = client.call.call_args
+                self.assertEqual(args, ("SYNO.AudioStation.Song", "search"))
+                self.assertEqual(kwargs[field], "X")
+                self.assertNotIn("title", kwargs)
 
     def test_missing_playlist_membership_is_not_treated_as_empty(self):
         client = AudioStation.__new__(AudioStation)
@@ -1507,6 +1518,48 @@ class PluginTest(unittest.TestCase):
         self.client.songs.reset_mock()
         self.plugin.sync_ratings(self.lib, self.options(0), [])
         self.client.songs.assert_called_once_with()
+
+    def test_per_song_search_falls_back_to_album_then_artist(self):
+        self.prepare_ratings()
+        self.one.album = "Album"
+        self.one.artist = "Artist"
+        self.one.store()
+        match = {"id": "1", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}}
+        other = {"id": "9", "path": "/music/other.mp3", "additional": {"song_rating": {"rating": 4}}}
+
+        self.client.songs.reset_mock()
+        self.client.songs.side_effect = [[other], [match]]
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.assertEqual(self.client.songs.call_args_list, [
+            call(title="one", rating=None),
+            call(album="Album", rating=None),
+        ])
+
+        self.client.songs.reset_mock()
+        self.client.songs.side_effect = [[], [other], [match]]
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.assertEqual(self.client.songs.call_args_list, [
+            call(title="one", rating=None),
+            call(album="Album", rating=None),
+            call(artist="Artist", rating=None),
+        ])
+
+        self.client.songs.reset_mock()
+        self.client.songs.side_effect = [[], [], []]
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.assertEqual(self.client.songs.call_count, 3)
+
+    def test_per_song_search_skips_empty_fields(self):
+        self.prepare_ratings()
+        self.one.artist = "Artist"
+        self.one.store()
+        self.client.songs.reset_mock()
+        self.client.songs.side_effect = [[], []]
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.assertEqual(self.client.songs.call_args_list, [
+            call(title="one", rating=None),
+            call(artist="Artist", rating=None),
+        ])
 
     def test_single_api_call_threshold_invalid(self):
         self.prepare_ratings()

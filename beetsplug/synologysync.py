@@ -279,9 +279,14 @@ class SynologySyncPlugin(BeetsPlugin):
                             item.path,
                         )
                     continue
-                if songs is None and not item.title:
+                searches = [
+                    (field, item.get(field))
+                    for field in ("title", "album", "artist")
+                    if item.get(field)
+                ]
+                if songs is None and not searches:
                     self._log.debug(
-                        "Item has no title, indexing AudioStation library: {}",
+                        "Item has no title, album or artist, indexing AudioStation library: {}",
                         item.path,
                     )
                     songs = self._song_index(client, rating=remote_filter)
@@ -289,27 +294,30 @@ class SynologySyncPlugin(BeetsPlugin):
                     song = songs.get(syno_path)
                 else:
                     song = None
-                    for candidate in client.songs(
-                        title=item.title, rating=remote_filter
-                    ):
-                        if song_path(candidate) == syno_path:
-                            if song is not None and song["id"] != candidate["id"]:
-                                raise ui.UserError(
-                                    f"Ambiguous AudioStation song path: {syno_path}"
-                                )
-                            song = candidate
+                    for field, value in searches:
+                        for candidate in client.songs(
+                            rating=remote_filter, **{field: value}
+                        ):
+                            if song_path(candidate) == syno_path:
+                                if song is not None and song["id"] != candidate["id"]:
+                                    raise ui.UserError(
+                                        f"Ambiguous AudioStation song path: {syno_path}"
+                                    )
+                                song = candidate
+                        if song is not None:
+                            break
+                        self._log.debug(
+                            "Mapped path '{}' not found in AudioStation for {} '{}'",
+                            syno_path,
+                            field,
+                            value,
+                        )
                 if song is None:
                     if songs is not None:
                         self._log.debug(
                             "Mapped path '{}' not found in AudioStation ({} songs indexed)",
                             syno_path,
                             len(songs),
-                        )
-                    else:
-                        self._log.debug(
-                            "Mapped path '{}' not found in AudioStation for title '{}'",
-                            syno_path,
-                            item.title,
                         )
                     if remote_filter is None:
                         self._log.warning(
