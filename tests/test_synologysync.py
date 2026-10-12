@@ -1,4 +1,5 @@
 import ast
+import base64
 import json
 import os
 import ssl
@@ -117,6 +118,18 @@ class ClientTest(unittest.TestCase):
                                  public_url=public_url)
                 manager.assert_not_called()
                 self.assertEqual(build.call_args.args, ("127.0.0.1",))
+
+    def test_proxy_authentication_preserves_utf8_encoding(self):
+        proxy_url = "http://" + "user:p%C3%A4ss@proxy.example:8080"
+        with patch("beetsplug._synology.getproxies", return_value={"https": proxy_url}), \
+             patch("beetsplug._synology.proxy_bypass", return_value=False), \
+             patch("beetsplug._synology.urllib3.ProxyManager") as build:
+            pool = build.return_value.connection_from_host.return_value
+            pool.request.side_effect = OSError("connection refused")
+            with self.assertRaises(SynologyError):
+                AudioStation("https://nas", "user", "secret")
+        header = build.call_args.kwargs["proxy_headers"]["proxy-authorization"]
+        self.assertEqual(base64.b64decode(header.split()[1]), "user:päss".encode("utf-8"))
 
     def test_api_path_cannot_escape_origin(self):
         client = AudioStation.__new__(AudioStation)

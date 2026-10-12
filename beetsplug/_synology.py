@@ -68,7 +68,9 @@ class AudioStation:
                         unquote(proxy_parts.username) + ":"
                         + unquote(proxy_parts.password or "")
                     )
-                    proxy_headers = urllib3.make_headers(proxy_basic_auth=credentials)
+                    proxy_headers = urllib3.make_headers(
+                        proxy_basic_auth=credentials, proxy_basic_auth_encoding="utf-8"
+                    )
                 manager = urllib3.ProxyManager(
                     proxy_url,
                     proxy_headers=proxy_headers,
