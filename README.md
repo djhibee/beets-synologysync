@@ -99,6 +99,8 @@ and authenticated requests are not automatically retried.
 beet syncSynoRatings artist:Example
 beet syncSynoRatings --dest=syno --force album:Example
 beet syncSynoRatings --url=https://nas.example.org:5001 --synouser=alice --beetuser=bob
+beet syncSynoRatings --rating 8 --dest=beet
+beet syncSynoRatings --rating 6 --dest=syno
 ```
 
 The default destination is `beet`; `--dest=syno` exports to AudioStation.
@@ -116,6 +118,17 @@ an absent beets user rating is skipped during export. Missing mapped songs are
 reported and skipped. Different existing destination ratings prompt for
 **update/keep**; `--force` or `force: rating/yes` updates without prompting.
 Equal ratings require no change.
+
+`--rating N` selects the **source** rating on the beets 0–10 scale, not the
+destination rating. With `--dest=beet`, AudioStation is queried for exactly
+`N / 2` stars, fetching all matching songs with pagination; only songs mapped to
+beets items are updated. Import accepts even values only (0, 2, 4, 6, 8, 10),
+because AudioStation has no half-star ratings. With `--dest=syno`, only beets
+items whose selected `beets-<user>` rating equals `N` are exported; odd values
+are rounded up as usual. Zero is a valid filter in either direction.
+Any positional beets query further restricts the selection. Existing conflict
+handling and `--force` still apply. This filters ratings; it does not assign a
+new rating to otherwise unmatched songs.
 
 ## Playlists
 
