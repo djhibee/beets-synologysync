@@ -87,13 +87,13 @@ Equal ratings require no change.
 ## Playlists
 
 ```sh
-beet syncPlaylistFromSyno
-beet syncPlaylistFromSyno -p favourites artist:Example
-beet syncPlaylistFromSyno --dest=syno --conflict=merge
-beet syncPlaylistFromSyno --dest=syno --force -p favourites
+beet syncPlaylist
+beet syncPlaylist -p favourites artist:Example
+beet syncPlaylist --dest=syno --conflict=merge
+beet syncPlaylist --dest=syno --force -p favourites
 ```
 
-Despite its historical name, this command works in both directions.
+This command works in both directions.
 It reads the playlist plugin's `playlist_dir`, `relative_to`, and
 `forward_slash` settings. Imports create UTF-8 M3U playlists; exports read
 `.m3u` and `.m3u8` files in `playlist_dir`. `-p/--playlist` selects an exact

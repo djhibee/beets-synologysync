@@ -173,6 +173,20 @@ class PluginTest(unittest.TestCase):
     def options(self, command=1, arguments=()):
         return self.plugin.commands()[command].parser.parse_args(list(arguments))[0]
 
+    def test_playlist_command_name_and_options(self):
+        commands = self.plugin.commands()
+        self.assertEqual([command.name for command in commands],
+                         ["syncRatings", "syncPlaylist"])
+        command = commands[1]
+        self.assertEqual(command.func, self.plugin.sync_playlists)
+        opts, args = command.parser.parse_args(
+            ["--dest=syno", "-p", "favourites", "--conflict=merge", "title:one"]
+        )
+        self.assertEqual(opts.dest, "syno")
+        self.assertEqual(opts.playlist, "favourites")
+        self.assertEqual(opts.conflict, "merge")
+        self.assertEqual(args, ["title:one"])
+
     def test_username_fallback_precedence(self):
         opts = self.options()
         self.plugin.config["synouser"] = ""
