@@ -29,13 +29,21 @@ class PathMapping:
             raise ui.UserError("synologysync.path_mapping must not be empty")
         self.mappings.sort(key=lambda entry: len(entry[0]), reverse=True)
 
-    def to_syno(self, path):
+    def rule(self, path):
         path = os.path.abspath(os.fsdecode(path))
         for local, remote in self.mappings:
             if os.path.commonpath([local, path]) == local:
-                suffix = os.path.relpath(path, local).replace(os.sep, "/")
-                return posixpath.normpath(posixpath.join(remote, suffix))
+                return local, remote
         return None
+
+    def to_syno(self, path):
+        rule = self.rule(path)
+        if rule is None:
+            return None
+        local, remote = rule
+        path = os.path.abspath(os.fsdecode(path))
+        suffix = os.path.relpath(path, local).replace(os.sep, "/")
+        return posixpath.normpath(posixpath.join(remote, suffix))
 
 
 def _unique(entries):
@@ -204,6 +212,23 @@ class SynologySyncPlugin(BeetsPlugin):
             )
         return songs
 
+    def _log_similar_paths(self, syno_path, paths):
+        name = posixpath.basename(syno_path)
+        similar = _unique(
+            path for path in paths if posixpath.basename(path) == name
+        )
+        if similar:
+            self._log.info(
+                "AudioStation songs with the same file name as '{}': {} "
+                "(check synologysync.path_mapping)",
+                syno_path,
+                similar[:10],
+            )
+        else:
+            self._log.info(
+                "No AudioStation song returned with file name '{}'", name
+            )
+
     def _plugin(self, name):
         for plugin in plugins.find_plugins():
             if plugin.name == name:
@@ -270,8 +295,10 @@ class SynologySyncPlugin(BeetsPlugin):
                 syno_path = mapping.to_syno(item.path)
                 if syno_path is None:
                     self._log.debug(
-                        "Local path '{}' does not match any configured path_mapping",
+                        "Local path '{}' does not match any configured path_mapping "
+                        "(local prefixes: {})",
                         item.path,
+                        [local for local, _ in mapping.mappings],
                     )
                     if remote_filter is None:
                         self._log.warning(
@@ -279,6 +306,15 @@ class SynologySyncPlugin(BeetsPlugin):
                             item.path,
                         )
                     continue
+                local_prefix, syno_prefix = mapping.rule(item.path)
+                self._log.debug(
+                    "Mapped local path '{}' to AudioStation path '{}' "
+                    "using path_mapping local '{}' -> syno '{}'",
+                    item.path,
+                    syno_path,
+                    local_prefix,
+                    syno_prefix,
+                )
                 searches = [
                     (field, item.get(field))
                     for field in ("title", "album", "artist")
@@ -294,11 +330,28 @@ class SynologySyncPlugin(BeetsPlugin):
                     song = songs.get(syno_path)
                 else:
                     song = None
+                    candidates = []
                     for field, value in searches:
-                        for candidate in client.songs(
+                        results = list(client.songs(
                             rating=remote_filter, **{field: value}
-                        ):
-                            if song_path(candidate) == syno_path:
+                        ))
+                        self._log.debug(
+                            "AudioStation search by {} '{}' returned {} songs",
+                            field,
+                            value,
+                            len(results),
+                        )
+                        for candidate in results:
+                            candidate_path = song_path(candidate)
+                            matched = candidate_path == syno_path
+                            self._log.debug(
+                                "Comparing AudioStation path '{}' with mapped path '{}': {}",
+                                candidate_path,
+                                syno_path,
+                                "match" if matched else "no match",
+                            )
+                            candidates.append(candidate_path)
+                            if matched:
                                 if song is not None and song["id"] != candidate["id"]:
                                     raise ui.UserError(
                                         f"Ambiguous AudioStation song path: {syno_path}"
@@ -324,6 +377,10 @@ class SynologySyncPlugin(BeetsPlugin):
                             "No mapped AudioStation song for {}: mapped path '{}' not found in AudioStation",
                             item.path,
                             syno_path,
+                        )
+                        self._log_similar_paths(
+                            syno_path,
+                            songs.keys() if songs is not None else candidates,
                         )
                     else:
                         self._log.debug(

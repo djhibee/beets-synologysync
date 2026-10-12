@@ -1473,6 +1473,33 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(warning.call_args.args[1], item_three.path)
         self.assertEqual(warning.call_args.args[2], "/music/three.mp3")
 
+    def test_per_song_search_logs_path_comparisons_and_similar_paths(self):
+        self.prepare_ratings()
+        other = {"id": "9", "path": "/volume1/music/one.mp3",
+                 "additional": {"song_rating": {"rating": 4}}}
+        self.client.songs.reset_mock()
+        self.client.songs.side_effect = None
+        self.client.songs.return_value = [other]
+        with patch.object(self.plugin._log, "debug") as debug, \
+                patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        debug_calls = [c.args for c in debug.call_args_list]
+        self.assertIn((
+            "Comparing AudioStation path '{}' with mapped path '{}': {}",
+            "/volume1/music/one.mp3", "/music/one.mp3", "no match",
+        ), debug_calls)
+        self.assertTrue(any(
+            c[0].startswith("Mapped local path '{}' to AudioStation path '{}'")
+            and c[2] == "/music/one.mp3"
+            for c in debug_calls
+        ))
+        info_calls = [c.args for c in info.call_args_list]
+        self.assertTrue(any(
+            c[0].startswith("AudioStation songs with the same file name as '{}'")
+            and c[1:3] == ("/music/one.mp3", ["/volume1/music/one.mp3"])
+            for c in info_calls
+        ))
+
     def test_playlist_export_missing_mapped_song_distinguishes_reasons(self):
         # Entry outside path_mapping
         item_unmapped = Item(path=b"/outside/unmapped.mp3", title="unmapped")
