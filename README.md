@@ -40,6 +40,13 @@ playlist:
   forward_slash: false
 ```
 
+The AudioStation username comes from `--synouser`, then
+`synologysync.synouser`. When neither is set, it falls back to
+`userrating.autorate.user`, `userrating.default_user`, the first entry in
+`userrating.beets_users`, then `"defaultUser"`, in that order. Empty values
+are treated as unset. This effective username also supplies the default
+rating user unless `--beetuser` or `synologysync.beetuser` overrides it.
+
 `syno` is the path prefix **as reported by AudioStation's song API**, not
 necessarily a DSM filesystem path such as `/volume1/music`. Multiple mappings
 are supported; the longest matching local prefix wins. Matches respect directory

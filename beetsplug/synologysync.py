@@ -99,9 +99,17 @@ class SynologySyncPlugin(BeetsPlugin):
 
     def _username(self, opts):
         username = opts.synouser or self.config["synouser"].get(str)
-        if not username:
-            raise ui.UserError("Set synologysync.synouser or --synouser")
-        return username
+        if username:
+            return username
+        userrating = config["userrating"]
+        username = (
+            userrating["autorate"]["user"].get("")
+            or userrating["default_user"].get("")
+        )
+        if username:
+            return username
+        users = userrating["beets_users"].get(None)
+        return users[0] if users and users[0] else "defaultUser"
 
     @contextmanager
     def _connect(self, opts):

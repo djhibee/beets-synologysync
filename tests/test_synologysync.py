@@ -8,6 +8,8 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
+import confuse
+
 from beets import config, ui
 from beets.dbcore import types
 from beets.library import Item, Library
@@ -118,6 +120,10 @@ class ClientTest(unittest.TestCase):
 
 class PluginTest(unittest.TestCase):
     def setUp(self):
+        config.get()
+        config_patch = patch.object(config, "sources", list(config.sources))
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = self.temp.name
@@ -166,6 +172,45 @@ class PluginTest(unittest.TestCase):
 
     def options(self, command=1, arguments=()):
         return self.plugin.commands()[command].parser.parse_args(list(arguments))[0]
+
+    def test_username_fallback_precedence(self):
+        opts = self.options()
+        self.plugin.config["synouser"] = ""
+        cases = [
+            ({}, "defaultUser"),
+            ({"beets_users": ["first", "second"]}, "first"),
+            ({"default_user": "default", "beets_users": ["first"]}, "default"),
+            ({"autorate": {"user": "auto"}, "default_user": "default",
+              "beets_users": ["first"]}, "auto"),
+            ({"autorate": {}, "beets_users": ["first"]}, "first"),
+            ({"autorate": {"user": ""}, "default_user": "",
+              "beets_users": ["first"]}, "first"),
+            ({"beets_users": []}, "defaultUser"),
+            ({"beets_users": ["", "second"]}, "defaultUser"),
+        ]
+        for settings, expected in cases:
+            with self.subTest(settings=settings):
+                isolated = confuse.Configuration("synologysync-test", read=False)
+                isolated["userrating"].set(settings)
+                with patch("beetsplug.synologysync.config", isolated):
+                    self.assertEqual(self.plugin._username(opts), expected)
+
+    def test_explicit_synology_username_overrides_userrating(self):
+        config["userrating"].set({"autorate": {"user": "auto"}})
+        self.assertEqual(self.plugin._username(self.options()), "alice")
+        self.assertEqual(
+            self.plugin._username(self.options(arguments=("--synouser=cli",))), "cli"
+        )
+        self.plugin.config["synouser"] = ""
+        self.assertEqual(
+            self.plugin._username(self.options(arguments=("--synouser=cli",))), "cli"
+        )
+
+    def test_playlist_connection_uses_fallback_username(self):
+        self.plugin.config["synouser"] = ""
+        config["userrating"].set({"autorate": {"user": "auto"}})
+        self.plugin.sync_playlists(self.lib, self.options(), ["title:one"])
+        self.assertEqual(self.client_patch.target.AudioStation.call_args.args[1], "auto")
 
     def test_mapping_uses_component_boundaries_and_longest_prefix(self):
         mapping = PathMapping([
@@ -287,6 +332,15 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
         self.assertEqual(parse(self.two.get("userrating")), {})
         self.client.close.assert_called_once()
+
+    def test_rating_import_uses_fallback_username(self):
+        parse = self.prepare_ratings()
+        self.plugin.config["synouser"] = ""
+        config["userrating"].set({"default_user": "fallback"})
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.one.load()
+        self.assertEqual(parse(self.one.get("userrating")), {"beets-fallback": 8})
+        self.assertEqual(self.client_patch.target.AudioStation.call_args.args[1], "fallback")
 
     def test_rating_export_uses_selected_user_and_rounds_half_stars_up(self):
         self.prepare_ratings()
