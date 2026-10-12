@@ -29,6 +29,11 @@ class RatingsType(types.Type):
 
 
 class ClientTest(unittest.TestCase):
+    def setUp(self):
+        proxy_patch = patch("beetsplug._synology.getproxies", return_value={})
+        proxy_patch.start()
+        self.addCleanup(proxy_patch.stop)
+
     def test_requires_https_without_embedded_credentials(self):
         for url in ("http://nas", "https://user@nas", "https://nas/?token=bad"):
             with self.subTest(url=url), self.assertRaises(SynologyError):
@@ -80,6 +85,38 @@ class ClientTest(unittest.TestCase):
                 with self.subTest(url=url), self.assertRaises(SynologyError):
                     AudioStation("https://127.0.0.1", "user", "secret", public_url=url)
             build.assert_not_called()
+
+    def test_default_connection_preserves_https_proxy(self):
+        with patch("beetsplug._synology.getproxies",
+                   return_value={"https": "http://proxy.example:8080"}), \
+             patch("beetsplug._synology.proxy_bypass", return_value=False), \
+             patch("beetsplug._synology.urllib3.ProxyManager") as build:
+            pool = build.return_value.connection_from_host.return_value
+            pool.request.side_effect = OSError("connection refused")
+            with self.assertRaises(SynologyError):
+                AudioStation("https://nas:5001", "user", "secret")
+        self.assertEqual(build.call_args.args, ("http://proxy.example:8080",))
+        build.return_value.connection_from_host.assert_called_once_with(
+            "nas", port=5001, scheme="https"
+        )
+        self.assertEqual(build.call_args.kwargs["assert_hostname"], "nas")
+        self.assertEqual(build.call_args.kwargs["cert_reqs"], ssl.CERT_REQUIRED)
+        pool.close.assert_called_once()
+
+    def test_no_proxy_and_public_url_use_direct_pool(self):
+        for public_url, bypass in ((None, True), ("https://nas.example.org", False)):
+            with self.subTest(public_url=public_url), \
+                 patch("beetsplug._synology.getproxies",
+                       return_value={"https": "http://proxy.example:8080"}), \
+                 patch("beetsplug._synology.proxy_bypass", return_value=bypass), \
+                 patch("beetsplug._synology.urllib3.ProxyManager") as manager, \
+                 patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
+                build.return_value.request.side_effect = OSError("connection refused")
+                with self.assertRaises(SynologyError):
+                    AudioStation("https://127.0.0.1", "user", "secret",
+                                 public_url=public_url)
+                manager.assert_not_called()
+                self.assertEqual(build.call_args.args, ("127.0.0.1",))
 
     def test_api_path_cannot_escape_origin(self):
         client = AudioStation.__new__(AudioStation)

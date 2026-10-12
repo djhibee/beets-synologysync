@@ -3,7 +3,8 @@
 import json
 import posixpath
 import ssl
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
+from urllib.request import getproxies, proxy_bypass
 
 import urllib3
 
@@ -48,16 +49,41 @@ class AudioStation:
             "Content-Type": "application/x-www-form-urlencoded",
             "Host": identity.netloc,
         }
-        self.pool = urllib3.HTTPSConnectionPool(
-            parts.hostname,
-            port=parts.port or 443,
-            ssl_context=ssl.create_default_context(cafile=ca_file),
-            cert_reqs=ssl.CERT_REQUIRED,
-            server_hostname=identity.hostname,
-            assert_hostname=identity.hostname,
-            timeout=timeout,
-            retries=False,
-        )
+        pool_options = {
+            "ssl_context": ssl.create_default_context(cafile=ca_file),
+            "cert_reqs": ssl.CERT_REQUIRED,
+            "server_hostname": identity.hostname,
+            "assert_hostname": identity.hostname,
+            "timeout": timeout,
+            "retries": False,
+        }
+        proxy = getproxies().get("https") if not public_url else None
+        if proxy and not proxy_bypass(parts.netloc):
+            try:
+                proxy_url = proxy if "://" in proxy else "http://" + proxy
+                proxy_parts = urlsplit(proxy_url)
+                proxy_headers = None
+                if proxy_parts.username is not None:
+                    credentials = (
+                        unquote(proxy_parts.username) + ":"
+                        + unquote(proxy_parts.password or "")
+                    )
+                    proxy_headers = urllib3.make_headers(proxy_basic_auth=credentials)
+                manager = urllib3.ProxyManager(
+                    proxy_url,
+                    proxy_headers=proxy_headers,
+                    proxy_ssl_context=ssl.create_default_context(),
+                    **pool_options,
+                )
+                self.pool = manager.connection_from_host(
+                    parts.hostname, port=parts.port or 443, scheme="https"
+                )
+            except (urllib3.exceptions.HTTPError, ValueError):
+                raise SynologyError("AudioStation HTTPS proxy configuration failed") from None
+        else:
+            self.pool = urllib3.HTTPSConnectionPool(
+                parts.hostname, port=parts.port or 443, **pool_options
+            )
         try:
             self.apis = self._request(
                 "query.cgi",

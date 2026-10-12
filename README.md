@@ -79,6 +79,9 @@ verification. The HTTP `Host` header uses the authority from `public_url`,
 including its port if specified. The public hostname is not resolved or
 contacted. Connection ports may differ; `public_url` never changes the actual
 connection destination or API path.
+This mode also bypasses environment proxies to keep the connection direct.
+Without `public_url`, HTTPS proxy settings and `no_proxy` exclusions continue
+to apply.
 
 `public_url` is optional and must be an HTTPS origin, without credentials,
 query, fragment, or a path other than `/`. When omitted, the connection URL

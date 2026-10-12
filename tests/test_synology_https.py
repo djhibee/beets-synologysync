@@ -1,6 +1,8 @@
 import json
 import os
+import select
 import shutil
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -8,6 +10,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
+from unittest.mock import patch
 
 from beetsplug._synology import AudioStation, SynologyError
 
@@ -33,6 +36,28 @@ class AudioStationHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class HTTPSProxyHandler(BaseHTTPRequestHandler):
+    def do_CONNECT(self):
+        self.server.targets.append(self.path)
+        with socket.create_connection(self.server.upstream, timeout=2) as upstream:
+            self.send_response(200)
+            self.end_headers()
+            peers = (self.connection, upstream)
+            while True:
+                readable, _, _ = select.select(peers, [], [], 2)
+                if not readable:
+                    return
+                for peer in readable:
+                    data = peer.recv(65536)
+                    if not data:
+                        return
+                    destination = upstream if peer is self.connection else self.connection
+                    destination.sendall(data)
 
     def log_message(self, format, *args):
         pass
@@ -88,6 +113,7 @@ class LocalHTTPSTest(unittest.TestCase):
         server.redirect = False
         server.sni = []
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(cert or self.dns_cert, self.key)
         context.set_servername_callback(
             lambda sock, name, ctx: server.sni.append(name)
@@ -158,3 +184,28 @@ class LocalHTTPSTest(unittest.TestCase):
                          public_url="https://nas.example.test", timeout=2)
         self.assertEqual(len(server.requests), 1)
         self.assertNotIn("passwd", server.requests[0][2])
+
+    def test_existing_https_proxy_connection_still_validates_certificate(self):
+        server, url = self.start_server(self.ip_cert)
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), HTTPSProxyHandler)
+        proxy.upstream = server.server_address
+        proxy.targets = []
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+
+        def stop_proxy():
+            proxy.shutdown()
+            thread.join()
+            proxy.server_close()
+
+        self.addCleanup(stop_proxy)
+        with patch("beetsplug._synology.getproxies", return_value={
+            "https": f"http://127.0.0.1:{proxy.server_port}"
+        }), patch("beetsplug._synology.proxy_bypass", return_value=False):
+            client = AudioStation(url, "test-user", "test-password",
+                                  ca_file=self.ca, timeout=2)
+            client.close()
+        self.assertTrue(proxy.targets)
+        self.assertTrue(all(target == f"127.0.0.1:{server.server_port}"
+                            for target in proxy.targets))
+        self.assertEqual(server.requests[1][2]["passwd"], ["test-password"])
