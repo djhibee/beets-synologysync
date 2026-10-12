@@ -174,16 +174,11 @@ class AudioStation:
         concealed = _conceal_sensitive(params)
         if method:
             self.log.info(
-                "Calling AudioStation API: {} ({}) with params: {}",
-                api,
-                method,
-                concealed,
+                f"Calling AudioStation API: {api} ({method}) with params: {concealed}"
             )
         else:
             self.log.info(
-                "Calling AudioStation API: {} with params: {}",
-                api,
-                concealed,
+                f"Calling AudioStation API: {api} with params: {concealed}"
             )
         try:
             response = self.pool.request(
@@ -203,11 +198,11 @@ class AudioStation:
         except (urllib3.exceptions.HTTPError, OSError, ValueError):
             if method:
                 self.log.warning(
-                    "AudioStation HTTPS request failed for {} ({})", api, method
+                    f"AudioStation HTTPS request failed for {api} ({method})"
                 )
             else:
                 self.log.warning(
-                    "AudioStation HTTPS request failed for {}", api
+                    f"AudioStation HTTPS request failed for {api}"
                 )
             # Do not expose requests containing credentials or session tokens.
             raise SynologyError("AudioStation HTTPS request failed") from None
@@ -216,11 +211,11 @@ class AudioStation:
             code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
             if method:
                 self.log.warning(
-                    "AudioStation API error ({}) for {} ({})", code, api, method
+                    f"AudioStation API error ({code}) for {api} ({method})"
                 )
             else:
                 self.log.warning(
-                    "AudioStation API error ({}) for {}", code, api
+                    f"AudioStation API error ({code}) for {api}"
                 )
             raise SynologyError(f"AudioStation API error ({code})")
         return payload.get("data", {})
@@ -252,13 +247,18 @@ class AudioStation:
             if not entries or offset >= data.get("total", offset):
                 break
 
-    def songs(self, rating=None):
+    def songs(self, rating=None, keyword=None):
         filters = {}
         if rating is not None:
             filters = {"song_rating_meq": rating, "song_rating_leq": rating}
+        if keyword is not None:
+            filters["keyword"] = keyword
+            method = "search"
+        else:
+            method = "list"
         return self._list(
             "SYNO.AudioStation.Song",
-            "list",
+            method,
             "songs",
             library="all",
             additional="song_rating",

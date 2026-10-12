@@ -67,6 +67,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 "timeout": 30,
                 "library": "all",
                 "playlist_library": "personal",
+                "SingleAPICallThreshold": 100,
             }
         )
 
@@ -114,6 +115,23 @@ class SynologySyncPlugin(BeetsPlugin):
         if value not in ("no", "rating", "playlist", "yes"):
             raise ui.UserError("synologysync.force must be no, rating, playlist, or yes")
         return opts.force or value in (kind, "yes")
+
+    def _single_api_call_threshold(self):
+        for key in (
+            "SingleAPICallThreshold",
+            "single_api_call_threshold",
+            "singleapicallthreshold",
+        ):
+            if key in self.config:
+                val = self.config[key].get()
+                if val is not None:
+                    try:
+                        return int(val)
+                    except (TypeError, ValueError):
+                        raise ui.UserError(
+                            f"synologysync.{key} must be an integer"
+                        ) from None
+        return 100
 
     def _username(self, opts):
         username = opts.synouser or self.config["synouser"].get(str)
@@ -223,6 +241,7 @@ class SynologySyncPlugin(BeetsPlugin):
             raise ui.UserError(str(exc)) from None
         force = self._force(opts, "rating")
         mapping = self._mapping()
+        threshold = self._single_api_call_threshold()
         items = list(lib.items(ui.decargs(args)))
         if rating is not None and opts.dest == "syno":
             try:
@@ -240,7 +259,11 @@ class SynologySyncPlugin(BeetsPlugin):
             remote_filter = (
                 rating // 2 if rating is not None and opts.dest == "beet" else None
             )
-            songs = self._song_index(client, rating=remote_filter)
+            use_global = not args or len(items) >= threshold
+            if use_global:
+                songs = self._song_index(client, rating=remote_filter)
+            else:
+                songs = None
             total = len(items)
             for idx, item in enumerate(items, 1):
                 self._log.info("Processing song ({}/{}): {}", idx, total, item.path)
@@ -256,13 +279,33 @@ class SynologySyncPlugin(BeetsPlugin):
                             item.path,
                         )
                     continue
-                song = songs.get(syno_path)
+                if songs is not None:
+                    song = songs.get(syno_path)
+                else:
+                    filename = os.path.basename(os.fsdecode(item.path))
+                    song = None
+                    for candidate in client.songs(
+                        keyword=filename, rating=remote_filter
+                    ):
+                        if song_path(candidate) == syno_path:
+                            if song is not None and song["id"] != candidate["id"]:
+                                raise ui.UserError(
+                                    f"Ambiguous AudioStation song path: {syno_path}"
+                                )
+                            song = candidate
                 if song is None:
-                    self._log.debug(
-                        "Mapped path '{}' not found in AudioStation ({} songs indexed)",
-                        syno_path,
-                        len(songs),
-                    )
+                    if songs is not None:
+                        self._log.debug(
+                            "Mapped path '{}' not found in AudioStation ({} songs indexed)",
+                            syno_path,
+                            len(songs),
+                        )
+                    else:
+                        self._log.debug(
+                            "Mapped path '{}' not found in AudioStation for keyword '{}'",
+                            syno_path,
+                            os.path.basename(os.fsdecode(item.path)),
+                        )
                     if remote_filter is None:
                         self._log.warning(
                             "No mapped AudioStation song for {}: mapped path '{}' not found in AudioStation",

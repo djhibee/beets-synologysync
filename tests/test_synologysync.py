@@ -1279,7 +1279,7 @@ class PluginTest(unittest.TestCase):
         self.plugin.sync_ratings(
             self.lib, self.options(0, ("--rating=8",)), ["title:two"]
         )
-        self.client.songs.assert_called_once_with(rating=4)
+        self.client.songs.assert_called_once_with(keyword="two.mp3", rating=4)
         self.one.load()
         self.two.load()
         self.assertEqual(parse(self.one.get("userrating")), {})
@@ -1378,7 +1378,7 @@ class PluginTest(unittest.TestCase):
     def test_sync_ratings_progress_and_connection_logs(self):
         self.prepare_ratings()
         with patch.object(self.plugin._log, "info") as log_info:
-            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+            self.plugin.sync_ratings(self.lib, self.options(0), [])
         calls = [c.args[0] for c in log_info.call_args_list]
         self.assertIn("Connecting to AudioStation...", calls)
         self.assertIn("Connected to AudioStation", calls)
@@ -1432,6 +1432,8 @@ class PluginTest(unittest.TestCase):
 
     def test_playlist_export_missing_mapped_song_distinguishes_reasons(self):
         # Entry outside path_mapping
+        item_unmapped = Item(path=b"/outside/unmapped.mp3", title="unmapped")
+        self.lib.add(item_unmapped)
         self.local_playlist("unmapped_playlist", ["/outside/unmapped.mp3"])
         with self.assertRaisesRegex(ui.UserError, "path does not match any path_mapping"):
             self.plugin.sync_playlists(
@@ -1440,11 +1442,54 @@ class PluginTest(unittest.TestCase):
 
         # Entry within path_mapping but not indexed in AudioStation
         missing_remote = os.path.join(self.music, "nonexistent.mp3")
+        item_missing = Item(path=os.fsencode(missing_remote), title="nonexistent")
+        self.lib.add(item_missing)
         self.local_playlist("missing_remote_playlist", [missing_remote])
         with self.assertRaisesRegex(ui.UserError, "not found in AudioStation"):
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno", "-p", "missing_remote_playlist")), []
             )
+
+    def test_single_api_call_threshold_per_song_vs_global(self):
+        self.prepare_ratings()
+        # Under threshold (default 100): 1 item matching query -> per-song search
+        self.client.songs.reset_mock()
+        self.client.songs.return_value = [
+            {"id": "1", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}}
+        ]
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.client.songs.assert_called_once_with(keyword="one.mp3", rating=None)
+
+        # Configured threshold = 1: 1 item matching query >= threshold -> global call
+        self.plugin.config["SingleAPICallThreshold"] = 1
+        self.client.songs.reset_mock()
+        self.client.songs.return_value = [
+            {"id": "1", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}},
+            {"id": "2", "path": "/music/two.mp3", "additional": {"song_rating": {"rating": 0}}},
+        ]
+        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.client.songs.assert_called_once_with()
+
+        # No query (empty args): always global call regardless of item count
+        self.plugin.config["SingleAPICallThreshold"] = 100
+        self.client.songs.reset_mock()
+        self.plugin.sync_ratings(self.lib, self.options(0), [])
+        self.client.songs.assert_called_once_with()
+
+    def test_single_api_call_threshold_invalid(self):
+        self.prepare_ratings()
+        self.plugin.config["SingleAPICallThreshold"] = "invalid"
+        with self.assertRaisesRegex(ui.UserError, "must be an integer"):
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+
+    def test_sync_ratings_per_song_ambiguous_result_raises(self):
+        self.prepare_ratings()
+        self.client.songs.return_value = [
+            {"id": "1", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}},
+            {"id": "99", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}},
+        ]
+        with self.assertRaisesRegex(ui.UserError, "Ambiguous AudioStation song path"):
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
 
 
 if __name__ == "__main__":
