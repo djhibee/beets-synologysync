@@ -86,6 +86,11 @@ class SynologySyncPlugin(BeetsPlugin):
             command.parser.add_option(
                 "--force", action="store_true", default=False, help="overwrite conflicts"
             )
+            if name == "syncSynoRatings":
+                command.parser.add_option(
+                    "--rating", type="int",
+                    help="synchronize only this source rating (0–10 beets scale)",
+                )
             if name == "syncSynoPlaylist":
                 command.parser.add_option("-p", "--playlist", help="playlist name")
                 command.parser.add_option(
@@ -160,9 +165,10 @@ class SynologySyncPlugin(BeetsPlugin):
                 "path_mapping must contain local/syno path pairs"
             ) from None
 
-    def _song_index(self, client):
+    def _song_index(self, client, rating=None):
         songs = {}
-        for song in client.songs():
+        entries = client.songs() if rating is None else client.songs(rating=rating)
+        for song in entries:
             path = song_path(song)
             if path in songs and songs[path]["id"] != song["id"]:
                 raise ui.UserError(f"Ambiguous AudioStation song path: {path}")
@@ -176,6 +182,14 @@ class SynologySyncPlugin(BeetsPlugin):
         raise ui.UserError(f"Enable the beets {name} plugin")
 
     def sync_ratings(self, lib, opts, args):
+        rating = opts.rating
+        if rating is not None:
+            if not 0 <= rating <= 10:
+                raise ui.UserError("--rating must be between 0 and 10")
+            if opts.dest == "beet" and rating % 2:
+                raise ui.UserError(
+                    "--rating must be even for --dest=beet (AudioStation uses whole stars)"
+                )
         self._plugin("userrating")
         try:
             from beetsplug.userrating.ratings import (
@@ -199,15 +213,28 @@ class SynologySyncPlugin(BeetsPlugin):
         force = self._force(opts, "rating")
         mapping = self._mapping()
         items = list(lib.items(ui.decargs(args)))
+        if rating is not None and opts.dest == "syno":
+            try:
+                items = [
+                    item for item in items
+                    if validate_rating(as_ratings(item.get("userrating")).get(user))
+                    == rating
+                ]
+            except (TypeError, ValueError) as exc:
+                raise ui.UserError(f"Unable to read song rating: {exc}") from None
         if not items:
             self._log.info("No items match the query")
             return
         with self._connect(opts) as client:
-            songs = self._song_index(client)
+            remote_filter = (
+                rating // 2 if rating is not None and opts.dest == "beet" else None
+            )
+            songs = self._song_index(client, rating=remote_filter)
             for item in items:
                 song = songs.get(mapping.to_syno(item.path))
                 if song is None:
-                    self._log.warning("No mapped AudioStation song for {}", item.path)
+                    if remote_filter is None:
+                        self._log.warning("No mapped AudioStation song for {}", item.path)
                     continue
                 try:
                     ratings = as_ratings(item.get("userrating"))
@@ -222,6 +249,8 @@ class SynologySyncPlugin(BeetsPlugin):
                     raise ui.UserError(f"Unable to read song rating: {exc}") from None
                 if opts.dest == "beet":
                     source, destination = remote * 2, local
+                    if rating is not None and source != rating:
+                        continue
                 else:
                     if local is None:
                         continue

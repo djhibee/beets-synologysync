@@ -165,13 +165,17 @@ class AudioStation:
             if not entries or offset >= data.get("total", offset):
                 break
 
-    def songs(self):
+    def songs(self, rating=None):
+        filters = {}
+        if rating is not None:
+            filters = {"song_rating_meq": rating, "song_rating_leq": rating}
         return self._list(
             "SYNO.AudioStation.Song",
             "list",
             "songs",
             library="all",
             additional="song_rating",
+            **filters,
         )
 
     def playlists(self, library="all"):

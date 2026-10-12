@@ -159,6 +159,24 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(client.call.call_args.kwargs["songs_offset"], 1)
         self.assertEqual(client.call.call_args.kwargs["songs_limit"], 500)
 
+    def test_rating_filter_is_exact_and_preserved_across_pages(self):
+        for rating in range(6):
+            with self.subTest(rating=rating):
+                client = AudioStation.__new__(AudioStation)
+                client.call = Mock(side_effect=[
+                    {"songs": [{"id": "1"}], "total": 2},
+                    {"songs": [{"id": "2"}], "total": 2},
+                ])
+                self.assertEqual(
+                    list(client.songs(rating=rating)), [{"id": "1"}, {"id": "2"}]
+                )
+                for offset, call in enumerate(client.call.call_args_list):
+                    self.assertEqual(call.args, ("SYNO.AudioStation.Song", "list"))
+                    self.assertEqual(call.kwargs["offset"], offset)
+                    self.assertEqual(call.kwargs["song_rating_meq"], rating)
+                    self.assertEqual(call.kwargs["song_rating_leq"], rating)
+                    self.assertEqual(call.kwargs["additional"], "song_rating")
+
     def test_missing_playlist_membership_is_not_treated_as_empty(self):
         client = AudioStation.__new__(AudioStation)
         client.call = Mock(return_value={"playlists": [{"additional": {}}]})
@@ -1188,6 +1206,84 @@ class PluginTest(unittest.TestCase):
         self.one.load()
         self.assertEqual(parse(self.one.get("userrating")), {"beets-fallback": 8})
         self.assertEqual(self.client_patch.target.AudioStation.call_args.args[1], "fallback")
+
+    def test_rating_import_filters_source_not_destination(self):
+        parse = self.prepare_ratings()
+        self.one["userrating"] = {"other": 3, "beets-alice": 2}
+        self.one.store()
+        with patch("beetsplug.synologysync.ui.input_options", return_value="u") as prompt:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--rating=8", "--dest=beet")), []
+            )
+        prompt.assert_called_once()
+        self.client.songs.assert_called_once_with(rating=4)
+        self.one.load()
+        self.two.load()
+        self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
+        self.assertEqual(parse(self.two.get("userrating")), {})
+
+    def test_rating_import_intersects_beets_query(self):
+        parse = self.prepare_ratings()
+        self.plugin.sync_ratings(
+            self.lib, self.options(0, ("--rating=8",)), ["title:two"]
+        )
+        self.client.songs.assert_called_once_with(rating=4)
+        self.one.load()
+        self.two.load()
+        self.assertEqual(parse(self.one.get("userrating")), {})
+        self.assertEqual(parse(self.two.get("userrating")), {})
+
+    def test_rating_import_zero_and_filtered_remote_results(self):
+        parse = self.prepare_ratings()
+        self.client.songs.return_value = [self.client.songs.return_value[1]]
+        with patch.object(self.plugin._log, "warning") as warning:
+            self.plugin.sync_ratings(self.lib, self.options(0, ("--rating=0",)), [])
+        warning.assert_not_called()
+        self.client.songs.assert_called_once_with(rating=0)
+        self.two.load()
+        self.assertEqual(parse(self.two.get("userrating")), {"beets-alice": 0})
+
+    def test_invalid_rating_rejected_before_connection(self):
+        for rating in ("-1", "11", "3"):
+            with self.subTest(rating=rating), self.assertRaises(ui.UserError):
+                self.plugin.sync_ratings(
+                    self.lib, self.options(0, ("--rating=" + rating,)), []
+                )
+        self.password.assert_not_called()
+
+    def test_rating_option_requires_integer(self):
+        with self.assertRaises(SystemExit):
+            self.options(0, ("--rating=4.5",))
+
+    def test_rating_export_filters_selected_user_and_query(self):
+        self.prepare_ratings()
+        self.one["userrating"] = {"beets-bob": 6, "beets-alice": 2}
+        self.two["userrating"] = {"beets-bob": 8, "beets-alice": 6}
+        self.one.store()
+        self.two.store()
+        opts = self.options(
+            0, ("--rating=6", "--dest=syno", "--beetuser=bob", "--force")
+        )
+        self.plugin.sync_ratings(self.lib, opts, ["title:two"])
+        self.password.assert_not_called()
+        self.plugin.sync_ratings(self.lib, opts, [])
+        self.client.songs.assert_called_once_with()
+        self.client.set_rating.assert_called_once_with("1", 3)
+
+    def test_rating_export_odd_zero_and_ten(self):
+        self.prepare_ratings()
+        for rating, stars in ((7, 4), (0, 0), (10, 5)):
+            with self.subTest(rating=rating):
+                self.client.set_rating.reset_mock()
+                self.one["userrating"] = {"beets-alice": rating}
+                self.one.store()
+                self.client.songs.return_value[0]["additional"]["song_rating"]["rating"] = 2
+                self.plugin.sync_ratings(
+                    self.lib,
+                    self.options(0, (f"--rating={rating}", "--dest=syno", "--force")),
+                    [],
+                )
+                self.client.set_rating.assert_called_once_with("1", stars)
 
     def test_rating_export_uses_selected_user_and_rounds_half_stars_up(self):
         self.prepare_ratings()
