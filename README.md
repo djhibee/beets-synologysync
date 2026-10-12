@@ -32,6 +32,8 @@ synologysync:
     - local: /home/alice/Music
       syno: /music
   force: "no"        # no | rating | playlist | yes
+  library: all      # all | personal | shared: playlist selection
+  playlist_library: personal  # personal | shared: new unprefixed playlists
   timeout: 30
   # ca_file: /home/alice/nas-ca.pem
 
@@ -122,13 +124,91 @@ beet syncPlaylist
 beet syncPlaylist -p favourites artist:Example
 beet syncPlaylist --dest=syno --conflict=merge
 beet syncPlaylist --dest=syno --force -p favourites
+beet syncPlaylist --library=shared
+beet syncPlaylist --dest=syno --force -p G_alice_favourites
 ```
 
 This command works in both directions.
 It reads the playlist plugin's `playlist_dir`, `relative_to`, and
 `forward_slash` settings. Imports create UTF-8 M3U playlists; exports read
-`.m3u` and `.m3u8` files in `playlist_dir`. `-p/--playlist` selects an exact
-playlist name, without an extension.
+`.m3u` and `.m3u8` files directly in `playlist_dir` (no subdirectories).
+`--library=all|personal|shared` overrides `synologysync.library` (default `all`).
+Only accessible, non-smart playlists are imported; existing smart export targets
+are skipped, never overwritten or recreated as normal playlists.
+
+### Playlist identity and filenames
+
+Imports use flat filenames:
+
+* `G_<owner alias>_<original name>.m3u` for shared playlists.
+* `P_<owner alias>_<original name>.m3u` for personal playlists.
+
+For example, Alice's personal and shared `favourites` playlists become
+`P_alice_favourites.m3u` and `G_alice_favourites.m3u`. Playlists of different
+owners also remain separate. Owner aliases contain at most eight ASCII letters,
+digits, or hyphens. Unsafe owner characters (including underscores) are replaced
+in the alias; truncation/sanitization collisions get numeric suffixes. The exact
+owner is retained in the beets SQLite table `synologysync_owner_aliases`, so aliases
+remain stable across runs and database reopening. Keep this database with the
+playlist files: unknown aliases fail rather than guessing an owner.
+Before allocating aliases for imports, every existing encoded filename is
+validated against the saved map, even across category selections. A lost or
+incomplete alias table therefore cannot silently reassign an old filename to a
+new owner with the same shortened alias; restore the map before importing.
+When a shared playlist's owner is unavailable in the API, its explicit filename
+is `G__<original name>.m3u`: the empty alias means **unknown owner**, not the login
+user, and does not create an alias-table entry.
+
+Original names retain underscores; filenames are parsed with only the first two
+underscores as delimiters. UTF-8 percent escaping preserves unsafe characters,
+literal percent signs, dots, trailing spaces, and reserved `G_`/`P_` name
+prefixes. Thus even a name containing `/` can round-trip without creating a
+subdirectory. Names exceeding the 255-byte encoded filename limit fail instead
+of being truncated. Do not rename the category/owner prefix unless intentionally
+changing the remote identity.
+
+`-p/--playlist` selects an exact filename stem (without extension) or the original
+AudioStation name. An exact existing stem takes precedence. Importing by original
+name can select homonyms across categories/owners. On export, an original name
+matching multiple local identities fails; select the generated stem or narrow
+`--library`. Ordinary beets queries, e.g. `beet ls playlist:P_alice_favourites`,
+work with the imported files, including `relative_to: playlist`.
+
+Exports resolve **category + full owner + original name** against the current API
+response, using the remote ID only for that operation. Remote IDs are never stored.
+Duplicate remote identities and multiple local files
+targeting one identity fail before any playlist is written, even with `--force`.
+There is no multiple-NAS namespace: use separate beets databases/playlist
+directories for different servers.
+
+An unprefixed local playlist always targets the triple consisting of
+`synologysync.playlist_library` (default `personal`), the connected username, and
+its original name. It updates only that exact remote identity, or creates it
+when absent. Same-name playlists in another category or owned by another user
+are left untouched; name uniqueness alone never retargets an unprefixed file.
+Set `playlist_library: shared` to target/create your own shared playlists.
+Ownerless shared targets require their explicit imported `G__` filename, not
+a plain name. `--library` selects targets, not the
+creation category; a creation category outside that selection is an error.
+To create a new playlist whose literal name starts with `G_` or `P_`, escape its
+first letter in the local filename, e.g. `%47_favourites.m3u` for `G_favourites`.
+Imports leave older plain filenames untouched and create encoded files instead;
+remove or explicitly select the older files before exporting if both identify
+the same destination.
+
+Missing personal owners fall back to the effective login username. Shared owner
+metadata is used when supplied by the API (top-level `owner` or
+`additional.owner`). An ownerless shared filename matches only a remote shared
+playlist with the same original name and still-unavailable owner; multiple such
+entries are ambiguous and fail even with force. If that remote playlist disappears
+or later gains owner metadata, export fails instead of guessing or creating for
+the login user: reimport to obtain the updated identity. Likewise, an encoded
+known-owner filename never updates an ownerless normal remote target. If an
+encoded playlist's owner is no longer present remotely, a new playlist is never
+silently created for a different logged-in user. Existing shared owners are honored via
+the resolved remote ID; permission errors propagate without category fallback.
+For the same reason, ambiguous ownership is an error, not a force-overwritable
+conflict.
 
 Queries filter playlist membership to matching beets items, preserving order.
 With a query, playlists with no matching songs are left untouched. With no query,
@@ -141,9 +221,9 @@ or **merge**. Merge keeps existing songs first, appends incoming songs, and
 removes duplicates. Use `--conflict=replace|skip|merge` to force that policy;
 `--force` or `force: playlist/yes` selects replace when no policy is supplied.
 Replace with a query replaces the destination membership with the filtered
-selection; use merge to retain other songs. Duplicate playlist names and unsafe
-filenames are rejected rather than choosing an arbitrary target. Local writes
-are atomic.
+selection; use merge to retain other songs. Homonyms are supported through their
+encoded identities; unresolved ambiguity is always rejected rather than choosing
+an arbitrary target. Local writes are atomic.
 
 ## Tests
 
@@ -154,6 +234,11 @@ python -m unittest discover -s tests -v
 Tests use a temporary beets database and mocked AudioStation transport. A real
 NAS is not needed for the tests; verify API compatibility and account permissions
 on your AudioStation installation before performing a bulk export.
+Native `playlist:` CLI queries were also verified with beets 2.0. Beets 2.14.1
+has a built-in playlist query limitation for libraries storing relative database
+paths: its playlist query compares absolute paths to those relative entries.
+The M3U files remain readable and synchronization still works; that upstream
+query limitation is not worked around by this plugin.
 Local HTTPS tests additionally generate temporary CA and server certificates
 with OpenSSL and verify certificate checks, SNI, `Host`, and redirect rejection
 over loopback. Those tests are skipped if the `openssl` executable is unavailable;

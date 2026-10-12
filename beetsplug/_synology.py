@@ -174,9 +174,9 @@ class AudioStation:
             additional="song_rating",
         )
 
-    def playlists(self):
+    def playlists(self, library="all"):
         return self._list(
-            "SYNO.AudioStation.Playlist", "list", "playlists", library="all"
+            "SYNO.AudioStation.Playlist", "list", "playlists", library=library
         )
 
     def playlist_songs(self, playlist_id):
@@ -207,10 +207,10 @@ class AudioStation:
     def set_rating(self, song_id, rating):
         self.call("SYNO.AudioStation.Song", "setrating", id=song_id, rating=rating)
 
-    def save_playlist(self, name, song_ids, playlist_id=None):
+    def save_playlist(self, name, song_ids, playlist_id=None, library="personal"):
         if playlist_id is None:
             playlist_id = self.call(
-                "SYNO.AudioStation.Playlist", "create", name=name, library="personal"
+                "SYNO.AudioStation.Playlist", "create", name=name, library=library
             )["id"]
             count = 0
         else:

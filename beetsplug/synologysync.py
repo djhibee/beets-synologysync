@@ -10,6 +10,12 @@ from beets import config, plugins, ui
 from beets.plugins import BeetsPlugin
 
 from beetsplug._synology import AudioStation, SynologyError, song_path
+from beetsplug._synology_playlists import (
+    OwnerAliases,
+    is_smart,
+    playlist_category,
+    playlist_identity,
+)
 
 
 class PathMapping:
@@ -59,6 +65,8 @@ class SynologySyncPlugin(BeetsPlugin):
                 "force": "no",
                 "ca_file": "",
                 "timeout": 30,
+                "library": "all",
+                "playlist_library": "personal",
             }
         )
 
@@ -80,6 +88,10 @@ class SynologySyncPlugin(BeetsPlugin):
             )
             if name == "syncPlaylist":
                 command.parser.add_option("-p", "--playlist", help="playlist name")
+                command.parser.add_option(
+                    "--library", type="choice", choices=("all", "personal", "shared"),
+                    help="AudioStation playlist libraries to synchronize",
+                )
                 command.parser.add_option(
                     "--conflict",
                     type="choice",
@@ -307,6 +319,12 @@ class SynologySyncPlugin(BeetsPlugin):
 
     def sync_playlists(self, lib, opts, args):
         self._force(opts, "playlist")
+        library = opts.library or self.config["library"].get(str)
+        creation_library = self.config["playlist_library"].get(str)
+        if library not in ("all", "personal", "shared"):
+            raise ui.UserError("synologysync.library must be all, personal, or shared")
+        if creation_library not in ("personal", "shared"):
+            raise ui.UserError("synologysync.playlist_library must be personal or shared")
         directory, base = self._playlist_settings()
         mapping = self._mapping()
         items = list(lib.items(ui.decargs(args)))
@@ -315,23 +333,86 @@ class SynologySyncPlugin(BeetsPlugin):
             self._log.info("No items match the query")
             return
         local = self._local_playlists(directory)
-        if opts.playlist:
-            _playlist_name(opts.playlist)
+        aliases = OwnerAliases(lib)
+        if opts.dest == "beet":
+            # The alias namespace spans categories: validate every existing
+            # encoded filename before allocating aliases for incoming owners.
+            for stem in local:
+                aliases.identity(stem)
+        username = self._username(opts)
         with self._connect(opts) as client:
             remote = {}
-            for playlist in client.playlists():
-                name = playlist["name"]
-                if opts.playlist and name != opts.playlist:
+            for playlist in client.playlists(library=library):
+                if opts.dest == "beet" and is_smart(playlist):
                     continue
-                _playlist_name(name)
-                if name in remote:
-                    raise ui.UserError(f"Ambiguous AudioStation playlist name: {name}")
-                remote[name] = playlist
+                if library != "all" and playlist_category(playlist) != library:
+                    continue
+                identity = playlist_identity(playlist, username)
+                if identity in remote:
+                    raise ui.UserError(f"Ambiguous AudioStation playlist identity: {identity}")
+                remote[identity] = playlist
             songs = self._song_index(client)
             if opts.dest == "beet":
-                self._playlists_to_beets(client, opts, mapping, items, remote, local, directory, base, bool(args))
+                imported = {}
+                for identity, playlist in remote.items():
+                    if is_smart(playlist):
+                        continue
+                    stem = aliases.filename(identity)
+                    imported[stem] = playlist
+                exact = opts.playlist in imported
+                imported = {
+                    stem: playlist for stem, playlist in imported.items()
+                    if not opts.playlist or (
+                        stem == opts.playlist if exact else playlist["name"] == opts.playlist
+                    )
+                }
+                self._playlists_to_beets(
+                    client, opts, mapping, items, imported, local,
+                    directory, base, bool(args),
+                )
             else:
-                self._playlists_to_syno(client, opts, mapping, selected, remote, local, songs, base, bool(args))
+                targets = {}
+                for stem, path in local.items():
+                    if opts.playlist in local and stem != opts.playlist:
+                        continue
+                    if (
+                        library != "all"
+                        and stem.startswith(("G_", "P_"))
+                        and ("shared" if stem.startswith("G_") else "personal") != library
+                    ):
+                        continue
+                    identity = aliases.identity(stem)
+                    encoded = identity is not None
+                    original = identity[2] if identity else stem
+                    if identity is None and stem.startswith(("%47_", "%50_")):
+                        original = chr(int(stem[1:3], 16)) + stem[3:]
+                    if opts.playlist and opts.playlist not in local and original != opts.playlist:
+                        continue
+                    if identity is None:
+                        identity = creation_library, username, original
+                    if library != "all" and identity[0] != library:
+                        raise ui.UserError("New playlist library is outside --library; set playlist_library")
+                    existing = remote.get(identity)
+                    if not existing:
+                        # An ownerless smart entry can only block a write, never
+                        # supply an identity for an update or creation.
+                        ownerless = remote.get((identity[0], None, identity[2]))
+                        if ownerless and is_smart(ownerless):
+                            existing = ownerless
+                        elif ownerless and encoded:
+                            raise ui.UserError(
+                                f"Remote playlist owner is unavailable for {stem}; "
+                                "reimport to obtain an explicit ownerless filename"
+                            )
+                    if identity in targets:
+                        raise ui.UserError(f"Ambiguous local playlist identity: {identity}")
+                    targets[identity] = (stem, path, existing)
+                if opts.playlist and opts.playlist not in local and len(targets) > 1:
+                    raise ui.UserError("Ambiguous playlist selection; use the exact generated stem")
+                self._playlists_to_syno(
+                    client, opts, mapping, selected, targets, songs, base,
+                    bool(args), username,
+                )
 
     def _playlists_to_beets(self, client, opts, mapping, items, remote, local, directory, base, queried):
         paths = {}
@@ -362,16 +443,25 @@ class SynologySyncPlugin(BeetsPlugin):
             self._write_playlist(path, base, entries)
             self._log.info("Synced playlist to beets: {}", name)
 
-    def _playlists_to_syno(self, client, opts, mapping, selected, remote, local, songs, base, queried):
-        for name, path in local.items():
-            if opts.playlist and name != opts.playlist:
+    def _playlists_to_syno(
+        self, client, opts, mapping, selected, targets, songs, base, queried, username
+    ):
+        for (library, owner, name), (stem, path, existing) in targets.items():
+            if existing and is_smart(existing):
+                self._log.info("Skipping smart playlist: {}", stem)
                 continue
-            existing = remote.get(name)
             if existing and opts.conflict == "skip":
                 continue
             entries = [entry for entry in self._read_playlist(path, base) if entry in selected]
             if not entries and queried:
                 continue
+            if not existing and owner is None:
+                raise ui.UserError(
+                    f"Cannot create a playlist with an unavailable owner: {stem}; "
+                    "reimport or explicitly use a new unprefixed filename"
+                )
+            if not existing and owner != username:
+                raise ui.UserError(f"Cannot create playlist for another owner: {owner}")
             policy = self._conflict(opts, name, existing is not None)
             if policy == "skip":
                 continue
@@ -385,5 +475,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 ids = _unique(
                     [song["id"] for song in client.playlist_songs(existing["id"])] + ids
                 )
-            client.save_playlist(name, ids, existing["id"] if existing else None)
+            client.save_playlist(
+                name, ids, existing["id"] if existing else None, library=library
+            )
             self._log.info("Synced playlist to AudioStation: {}", name)

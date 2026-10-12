@@ -5,6 +5,7 @@ import os
 import ssl
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -15,7 +16,8 @@ from beets.dbcore import types
 from beets.library import Item, Library
 from beets.plugins import BeetsPlugin
 from beetsplug._synology import AudioStation, SynologyError
-from beetsplug.playlist import PlaylistPlugin
+from beetsplug._synology_playlists import OwnerAliases, decode_name, encode_name
+from beetsplug.playlist import PlaylistPlugin, PlaylistQuery
 from beetsplug.synologysync import PathMapping, SynologySyncPlugin, _playlist_name
 
 
@@ -180,6 +182,31 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(client.call.call_args.kwargs,
                          {"id": "new", "offset": 0, "limit": 0, "songs": ""})
 
+    def test_playlist_library_selection_is_sent_to_api(self):
+        client = AudioStation.__new__(AudioStation)
+        client.call = Mock(return_value={"playlists": [], "total": 0})
+        list(client.playlists(library="shared"))
+        self.assertEqual(client.call.call_args.kwargs["library"], "shared")
+        list(client.playlists())
+        self.assertEqual(client.call.call_args.kwargs["library"], "all")
+
+    def test_shared_creation_does_not_fall_back_on_permission_failure(self):
+        client = AudioStation.__new__(AudioStation)
+        client.call = Mock(side_effect=SynologyError("permission denied"))
+        with self.assertRaises(SynologyError):
+            client.save_playlist("shared playlist", ["song"], library="shared")
+        client.call.assert_called_once_with(
+            "SYNO.AudioStation.Playlist", "create",
+            name="shared playlist", library="shared",
+        )
+
+    def test_shared_creation_uses_requested_library_and_new_id(self):
+        client = AudioStation.__new__(AudioStation)
+        client.call = Mock(side_effect=[{"id": "shared_new"}, {}])
+        client.save_playlist("shared playlist", ["song"], library="shared")
+        self.assertEqual(client.call.call_args_list[0].kwargs["library"], "shared")
+        self.assertEqual(client.call.call_args_list[1].kwargs["id"], "shared_new")
+
     def test_redirects_are_refused(self):
         with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
             build.return_value.request.return_value = Mock(status=307)
@@ -256,7 +283,10 @@ class PluginTest(unittest.TestCase):
             {"id": "1", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}},
             {"id": "2", "path": "/music/two.mp3", "additional": {"song_rating": {"rating": 0}}},
         ]
-        self.client.playlists.return_value = [{"id": "p1", "name": "favourites"}]
+        self.client.playlists.return_value = [
+            {"id": "p1", "name": "favourites", "library": "personal",
+             "owner": "alice", "type": "normal"}
+        ]
         self.client.playlist_songs.return_value = list(self.client.songs.return_value)
         self.client_patch = patch("beetsplug.synologysync.AudioStation", return_value=self.client)
         self.client_patch.start()
@@ -344,7 +374,7 @@ class PluginTest(unittest.TestCase):
 
     def test_playlist_import_obeys_query_and_relative_paths(self):
         self.plugin.sync_playlists(self.lib, self.options(), ["title:one"])
-        path = os.path.join(self.playlists, "favourites.m3u")
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
         self.assertEqual(self.plugin._read_playlist(path, self.playlists), [os.fsdecode(self.one.path)])
         self.client.close.assert_called_once()
         self.password.assert_called_once()
@@ -357,23 +387,28 @@ class PluginTest(unittest.TestCase):
             self.lib, self.options(arguments=("--dest=syno", "-p", "favourites", "--force")),
             ["title:one"],
         )
-        self.client.save_playlist.assert_called_once_with("favourites", ["1"], "p1")
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], "p1", library="personal"
+        )
 
     def test_playlist_merge_preserves_order_and_removes_duplicates(self):
-        path = os.path.join(self.playlists, "favourites.m3u")
+        OwnerAliases(self.lib).alias("alice")
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
         self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.two.path)])
         self.plugin.sync_playlists(self.lib, self.options(arguments=("--conflict=merge",)), [])
         self.assertEqual(self.plugin._read_playlist(path, self.playlists),
                          [os.fsdecode(self.two.path), os.fsdecode(self.one.path)])
 
     def test_playlist_skip_does_not_write(self):
-        path = os.path.join(self.playlists, "favourites.m3u")
+        OwnerAliases(self.lib).alias("alice")
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
         self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.two.path)])
         self.plugin.sync_playlists(self.lib, self.options(arguments=("--conflict=skip",)), [])
         self.assertEqual(self.plugin._read_playlist(path, self.playlists), [os.fsdecode(self.two.path)])
 
     def test_playlist_skip_does_not_fetch_incoming_membership(self):
-        path = os.path.join(self.playlists, "favourites.m3u")
+        OwnerAliases(self.lib).alias("alice")
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
         self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.two.path)])
         self.client.playlist_songs.side_effect = SynologyError("Unreadable playlist")
         self.plugin.sync_playlists(self.lib, self.options(arguments=("--conflict=skip",)), [])
@@ -410,6 +445,697 @@ class PluginTest(unittest.TestCase):
         os.symlink(os.path.join(self.root, "outside"), os.path.join(self.playlists, "bad.m3u"))
         with self.assertRaises(ui.UserError):
             self.plugin._local_playlists(self.playlists)
+
+    def remote_playlist(self, name="favourites", owner="alice",
+                        library="personal", playlist_id="p1", **extra):
+        return dict(id=playlist_id, name=name, owner=owner, library=library,
+                    type="normal", **extra)
+
+    def local_playlist(self, stem, songs=None):
+        path = os.path.join(self.playlists, stem + ".m3u")
+        self.plugin._write_playlist(
+            path, self.playlists,
+            songs if songs is not None else [os.fsdecode(self.one.path)],
+        )
+        return path
+
+    def test_personal_shared_homonyms_import_and_export_preserve_identity(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(library="shared", playlist_id="g1")
+        )
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(sorted(os.listdir(self.playlists)),
+                         ["G_alice_favourites.m3u", "P_alice_favourites.m3u"])
+        self.client.save_playlist.reset_mock()
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.assertEqual(self.client.save_playlist.call_count, 2)
+        self.client.save_playlist.assert_any_call(
+            "favourites", ["1", "2"], "g1", library="shared"
+        )
+        self.client.save_playlist.assert_any_call(
+            "favourites", ["1", "2"], "p1", library="personal"
+        )
+
+    def test_multiple_shared_owners_keep_separate_flat_files(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1"),
+            self.remote_playlist(owner="alice", library="shared", playlist_id="g2"),
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(sorted(os.listdir(self.playlists)),
+                         ["G_alice_favourites.m3u", "G_bob_favourites.m3u"])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "-p", "G_bob_favourites", "--force")),
+            [],
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1", "2"], "g1", library="shared"
+        )
+
+    def test_owner_alias_collision_and_unsafe_characters_survive_reopen(self):
+        owners = ["longusername-one", "longusername-two", "longuser",
+                  "a_b/c\\d", "a-b-c-d", "☃", "alice"]
+        aliases = OwnerAliases(self.lib)
+        allocated = {owner: aliases.alias(owner) for owner in owners}
+        self.assertEqual(len(set(allocated.values())), len(owners))
+        self.assertTrue(all(len(alias) <= 8 and "_" not in alias
+                            for alias in allocated.values()))
+        filename = aliases.filename(("shared", owners[3], "with_under_scores"))
+        database = self.lib.path
+        self.lib._close()
+        self.lib = Library(database)
+        self.addCleanup(self.lib._close)
+        reopened = OwnerAliases(self.lib)
+        for owner, alias in allocated.items():
+            self.assertEqual(reopened.alias(owner), alias)
+            self.assertEqual(reopened.owner(alias), owner)
+        self.assertEqual(reopened.identity(filename),
+                         ("shared", owners[3], "with_under_scores"))
+        with self.lib.transaction() as tx:
+            columns = tx.query("PRAGMA table_info(synologysync_owner_aliases)")
+        self.assertEqual([row["name"] for row in columns], ["alias", "owner"])
+
+    def test_owner_alias_concurrent_allocation_is_unique_and_stable(self):
+        other_lib = Library(self.lib.path)
+        self.addCleanup(other_lib._close)
+        aliases = [OwnerAliases(self.lib), OwnerAliases(other_lib)]
+        owners = ["longusername-one", "longusername-two"] * 8
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda entry: aliases[entry[0] % 2].alias(entry[1]),
+                enumerate(owners),
+            ))
+        allocated = {owner: alias for owner, alias in zip(owners, results)}
+        self.assertEqual(len(set(allocated.values())), 2)
+        for owner, alias in zip(owners, results):
+            self.assertEqual(alias, allocated[owner])
+            self.assertEqual(aliases[0].owner(alias), owner)
+
+    def test_remote_original_names_escape_and_roundtrip(self):
+        names = ["with_under_scores", "G_fake_name", "P_fake_name",
+                 "../a/b\\c:100%?*|<>", "雪 ☃ #Mix", "trailing. ",
+                 "A%2FB", ".", "..", "line\nbreak"]
+        for name in names:
+            self.assertEqual(decode_name(encode_name(name)), name)
+        self.client.playlists.return_value = [
+            self.remote_playlist(name=name, playlist_id=str(index))
+            for index, name in enumerate(names)
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(len(os.listdir(self.playlists)), len(names))
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        for index, name in enumerate(names):
+            self.client.save_playlist.assert_any_call(
+                name, ["1", "2"], str(index), library="personal"
+            )
+
+    def test_overlong_remote_name_is_rejected_not_truncated(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(name="a" * 300)
+        ]
+        with self.assertRaisesRegex(ui.UserError, "255 bytes"):
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+
+    def test_library_config_and_cli_override(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(library="shared", playlist_id="g1")
+        )
+        self.plugin.config["library"] = "personal"
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.client.playlists.assert_called_with(library="personal")
+        self.assertEqual(os.listdir(self.playlists), ["P_alice_favourites.m3u"])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--library=shared",)), []
+        )
+        self.client.playlists.assert_called_with(library="shared")
+        self.assertIn("G_alice_favourites.m3u", os.listdir(self.playlists))
+
+    def test_invalid_library_configuration_is_rejected_before_login(self):
+        for key, value in (("library", "invalid"), ("playlist_library", "all")):
+            with self.subTest(key=key):
+                old = self.plugin.config[key].get()
+                self.plugin.config[key] = value
+                with self.assertRaises(ui.UserError):
+                    self.plugin.sync_playlists(self.lib, self.options(), [])
+                self.plugin.config[key] = old
+        self.password.assert_not_called()
+
+    def test_new_shared_creation_uses_creation_config(self):
+        self.local_playlist("new_playlist")
+        self.plugin.config["playlist_library"] = "shared"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--library=shared")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "new_playlist", ["1"], None, library="shared"
+        )
+
+    def test_new_personal_creation_is_default(self):
+        self.local_playlist("new_playlist")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno",)), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "new_playlist", ["1"], None, library="personal"
+        )
+
+    def test_creation_outside_selected_library_fails_without_fallback(self):
+        self.local_playlist("new_playlist")
+        with self.assertRaisesRegex(ui.UserError, "outside --library"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--library=shared")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_smart_playlists_are_not_imported(self):
+        smart = self.remote_playlist(library="shared", owner="")
+        smart["type"] = "smart"
+        self.client.playlists.return_value = [smart]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+        self.client.playlist_songs.assert_not_called()
+
+    def test_smart_existing_export_is_skipped_not_created(self):
+        self.local_playlist("favourites")
+        self.client.playlists.return_value[0]["type"] = "smart"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_not_called()
+        self.client.playlist_songs.assert_not_called()
+
+    def test_ownerless_shared_smart_export_targets_are_skipped(self):
+        smart = self.remote_playlist(owner="", library="shared", playlist_id="g1")
+        smart["type"] = "smart"
+        self.client.playlists.return_value = [smart]
+        stem = OwnerAliases(self.lib).filename(("shared", "bob", "favourites"))
+        self.local_playlist(stem)
+        self.local_playlist("favourites")
+        self.plugin.config["playlist_library"] = "shared"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--library=shared", "--force")), []
+        )
+        self.client.save_playlist.assert_not_called()
+        self.client.playlist_songs.assert_not_called()
+
+    def test_smart_id_and_boolean_markers_are_skipped(self):
+        for marker in ({"id": "playlist_personal_smart/favourites"},
+                       {"is_smart": True}, {"is_smart": "true"}):
+            with self.subTest(marker=marker):
+                playlist = self.remote_playlist()
+                playlist.update(marker)
+                self.client.playlists.return_value = [playlist]
+                self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+
+    def test_duplicate_remote_identity_is_rejected_even_with_force(self):
+        self.client.playlists.return_value.append(self.remote_playlist(playlist_id="p2"))
+        self.local_playlist("favourites")
+        for dest in ("beet", "syno"):
+            with self.subTest(dest=dest), self.assertRaisesRegex(ui.UserError, "Ambiguous"):
+                self.plugin.sync_playlists(
+                    self.lib, self.options(arguments=(f"--dest={dest}", "--force")), []
+                )
+        self.client.save_playlist.assert_not_called()
+
+    def test_plain_export_homonyms_only_update_default_identity(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(library="shared", playlist_id="g1")
+        )
+        self.local_playlist("favourites")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], "p1", library="personal"
+        )
+
+    def test_export_original_name_homonyms_require_exact_stem(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(library="shared", playlist_id="g1")
+        )
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        with self.assertRaisesRegex(ui.UserError, "Ambiguous playlist selection"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force", "-p", "favourites")), []
+            )
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force", "-p", "G_alice_favourites")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1", "2"], "g1", library="shared"
+        )
+
+    def test_import_original_name_selects_homonyms_but_exact_stem_selects_one(self):
+        self.client.playlists.return_value += [
+            self.remote_playlist(library="shared", playlist_id="g1"),
+            self.remote_playlist(name="unselected", playlist_id="p2"),
+        ]
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("-p", "G_alice_favourites")), []
+        )
+        self.assertEqual(os.listdir(self.playlists), ["G_alice_favourites.m3u"])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("-p", "favourites", "--force")), []
+        )
+        self.assertEqual(len(os.listdir(self.playlists)), 2)
+
+    def test_unknown_alias_is_not_replaced_by_remote_owner(self):
+        self.local_playlist("P_unknown_favourites")
+        with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_import_lost_alias_table_cannot_rebind_colliding_owner_with_force_or_skip(self):
+        aliases = OwnerAliases(self.lib)
+        stem = aliases.filename(("shared", "longusername-one", "favourites"))
+        path = self.local_playlist(stem)
+        self.assertEqual(stem, "G_longuser_favourites")
+        with self.lib.transaction() as tx:
+            tx.mutate("DROP TABLE synologysync_owner_aliases")
+        self.client.playlists.return_value = [
+            self.remote_playlist(
+                owner="longusername-two", library="shared", playlist_id="g2"
+            )
+        ]
+        for arguments in (("--force",), ("--conflict=skip",)):
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+                    self.plugin.sync_playlists(
+                        self.lib, self.options(arguments=arguments), []
+                    )
+                with self.lib.transaction() as tx:
+                    self.assertEqual(
+                        tx.query("SELECT alias, owner FROM synologysync_owner_aliases"), []
+                    )
+                self.assertEqual(
+                    self.plugin._read_playlist(path, self.playlists),
+                    [os.fsdecode(self.one.path)],
+                )
+        self.password.assert_not_called()
+        with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_import_checks_other_category_before_allocating_global_owner_alias(self):
+        stem = OwnerAliases(self.lib).filename(
+            ("personal", "longusername-one", "favourites")
+        )
+        self.local_playlist(stem)
+        with self.lib.transaction() as tx:
+            tx.mutate("DELETE FROM synologysync_owner_aliases")
+        self.client.playlists.return_value = [
+            self.remote_playlist(
+                owner="longusername-two", library="shared", playlist_id="g2"
+            )
+        ]
+        with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--library=shared", "--force")), []
+            )
+        with self.lib.transaction() as tx:
+            self.assertEqual(
+                tx.query("SELECT alias, owner FROM synologysync_owner_aliases"), []
+            )
+        self.password.assert_not_called()
+
+    def test_invalid_stored_alias_cannot_create_unsafe_import_filename(self):
+        aliases = OwnerAliases(self.lib)
+        aliases.alias("alice")
+        with self.lib.transaction() as tx:
+            tx.mutate(
+                "UPDATE synologysync_owner_aliases SET alias = ? WHERE owner = ?",
+                ("../bad", "alice"),
+            )
+        with self.assertRaisesRegex(ui.UserError, "Invalid stored"):
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+
+    def test_malformed_encoded_filenames_fail_before_remote_write(self):
+        for stem in ("P_alice", "P_alice_%ZZ", "G__", "P__name", "P_alice_"):
+            with self.subTest(stem=stem):
+                path = self.local_playlist(stem)
+                OwnerAliases(self.lib).alias("alice")
+                with self.assertRaises(ui.UserError):
+                    self.plugin.sync_playlists(
+                        self.lib, self.options(arguments=("--dest=syno", "--force")), []
+                    )
+                os.unlink(path)
+        self.client.save_playlist.assert_not_called()
+
+    def test_stale_foreign_personal_owner_never_creates_as_login(self):
+        stem = OwnerAliases(self.lib).filename(("personal", "old_owner", "favourites"))
+        self.local_playlist(stem)
+        with self.assertRaisesRegex(ui.UserError, "another owner"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_stale_foreign_shared_owner_never_changes_other_owner(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
+        ]
+        stem = OwnerAliases(self.lib).filename(("shared", "old_owner", "favourites"))
+        self.local_playlist(stem)
+        with self.assertRaisesRegex(ui.UserError, "another owner"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_foreign_personal_existing_owner_can_be_updated_by_id(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", playlist_id="bob1")
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1", "2"], "bob1", library="personal"
+        )
+
+    def test_missing_foreign_personal_playlist_cannot_be_created_for_login(self):
+        stem = OwnerAliases(self.lib).filename(("personal", "bob", "missing"))
+        self.local_playlist(stem)
+        with self.assertRaisesRegex(ui.UserError, "another owner"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_query_empty_foreign_missing_playlist_is_left_untouched(self):
+        stem = OwnerAliases(self.lib).filename(("personal", "bob", "missing"))
+        self.local_playlist(stem, [os.fsdecode(self.two.path)])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), ["title:one"]
+        )
+        self.client.save_playlist.assert_not_called()
+
+    def test_known_encoded_missing_shared_playlist_preserves_creation_category(self):
+        stem = OwnerAliases(self.lib).filename(("shared", "alice", "missing"))
+        self.local_playlist(stem)
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno",)), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "missing", ["1"], None, library="shared"
+        )
+
+    def test_own_encoded_missing_playlist_does_not_update_foreign_homonym(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="bob1")
+        ]
+        stem = OwnerAliases(self.lib).filename(("shared", "alice", "favourites"))
+        self.local_playlist(stem)
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="shared"
+        )
+
+    def test_library_filter_excludes_unknown_alias_in_other_category(self):
+        self.local_playlist("P_unknown_favourites")
+        self.client.playlists.return_value = []
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--library=shared")), []
+        )
+        self.client.save_playlist.assert_not_called()
+
+    def test_library_filter_excludes_missing_owner_in_other_category(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(owner="", library="shared")
+        )
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--library=personal",)), []
+        )
+        self.assertEqual(os.listdir(self.playlists), ["P_alice_favourites.m3u"])
+
+    def test_export_merge_preserves_owner_category_and_order(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
+        ]
+        stem = OwnerAliases(self.lib).filename(("shared", "bob", "favourites"))
+        self.local_playlist(stem, [os.fsdecode(self.one.path), os.fsdecode(self.two.path)])
+        self.client.playlist_songs.return_value = [
+            {"id": "2"}, {"id": "3"}
+        ]
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--conflict=merge")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["2", "3", "1"], "g1", library="shared"
+        )
+
+    def test_permission_errors_for_shared_existing_owner_propagate(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.client.save_playlist.side_effect = SynologyError("permission denied")
+        with self.assertRaisesRegex(ui.UserError, "permission denied"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1", "2"], "g1", library="shared"
+        )
+
+    def test_missing_personal_owner_uses_effective_username(self):
+        del self.client.playlists.return_value[0]["owner"]
+        self.plugin.sync_playlists(self.lib, self.options(arguments=("--synouser=bob",)), [])
+        self.assertEqual(os.listdir(self.playlists), ["P_bob_favourites.m3u"])
+
+    def test_missing_shared_owner_roundtrips_without_guessing_connected_user(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="g1")
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), ["G__favourites.m3u"])
+        aliases = OwnerAliases(self.lib)
+        self.assertEqual(aliases.identity("G__favourites"),
+                         ("shared", None, "favourites"))
+        with self.lib.transaction() as tx:
+            self.assertEqual(tx.query("SELECT * FROM synologysync_owner_aliases"), [])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1", "2"], "g1", library="shared"
+        )
+
+    def test_unprefixed_name_never_matches_unique_ownerless_shared_remote(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="g1")
+        ]
+        self.local_playlist("favourites")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="personal"
+        )
+
+    def test_unprefixed_name_never_matches_unique_foreign_shared_remote(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
+        ]
+        self.local_playlist("favourites")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="personal"
+        )
+
+    def test_unprefixed_name_never_matches_unique_current_shared_remote(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="alice", library="shared", playlist_id="g1")
+        ]
+        self.local_playlist("favourites")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="personal"
+        )
+
+    def test_unprefixed_name_never_matches_unique_foreign_personal_remote(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="personal", playlist_id="bob1")
+        ]
+        self.local_playlist("favourites")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="personal"
+        )
+
+    def test_unprefixed_name_targets_configured_shared_current_owner_only(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="bob1"),
+            self.remote_playlist(owner="alice", library="personal", playlist_id="p1"),
+            self.remote_playlist(owner="alice", library="shared", playlist_id="alice1"),
+        ]
+        self.local_playlist("favourites")
+        self.plugin.config["playlist_library"] = "shared"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], "alice1", library="shared"
+        )
+
+    def test_unprefixed_shared_default_creates_current_owner_not_foreign_homonym(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="bob1")
+        ]
+        self.local_playlist("favourites")
+        self.plugin.config["playlist_library"] = "shared"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--library=shared", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="shared"
+        )
+
+    def test_unprefixed_shared_default_does_not_match_ownerless_normal_target(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="unknown1")
+        ]
+        self.local_playlist("favourites")
+        self.plugin.config["playlist_library"] = "shared"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--library=shared", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], None, library="shared"
+        )
+
+    def test_duplicate_ownerless_shared_names_are_ambiguous_even_with_force(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="g1"),
+            self.remote_playlist(owner="", library="shared", playlist_id="g2"),
+        ]
+        self.local_playlist("G__favourites")
+        for dest in ("beet", "syno"):
+            with self.subTest(dest=dest), self.assertRaisesRegex(ui.UserError, "Ambiguous"):
+                self.plugin.sync_playlists(
+                    self.lib, self.options(arguments=(f"--dest={dest}", "--force")), []
+                )
+        self.client.save_playlist.assert_not_called()
+
+    def test_ownerless_encoded_missing_target_cannot_be_created_for_login(self):
+        self.local_playlist("G__missing")
+        with self.assertRaisesRegex(ui.UserError, "unavailable owner"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_ownerless_encoded_target_does_not_match_newly_available_owner(self):
+        self.local_playlist("G__favourites")
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
+        ]
+        with self.assertRaisesRegex(ui.UserError, "unavailable owner"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_known_owner_encoded_target_does_not_match_ownerless_remote(self):
+        stem = OwnerAliases(self.lib).filename(("shared", "alice", "favourites"))
+        self.local_playlist(stem)
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="g1")
+        ]
+        with self.assertRaisesRegex(ui.UserError, "owner is unavailable"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_ownerless_shared_name_escaping_remains_reversible(self):
+        name = "G_under_scores/100%"
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="g1", name=name)
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        stem = os.path.splitext(os.listdir(self.playlists)[0])[0]
+        self.assertEqual(stem, "G__%47_under_scores%2F100%25")
+        self.assertEqual(OwnerAliases(self.lib).identity(stem), ("shared", None, name))
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force", "-p", stem)), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            name, ["1", "2"], "g1", library="shared"
+        )
+
+    def test_category_id_and_additional_owner_metadata(self):
+        self.client.playlists.return_value = [
+            {"id": "playlist_shared_normal/favourites", "name": "favourites",
+             "additional": {"owner": "bob"}, "type": "normal"}
+        ]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), ["G_bob_favourites.m3u"])
+
+    def test_plain_import_collision_is_not_silently_migrated_or_overwritten(self):
+        path = self.local_playlist("favourites", [os.fsdecode(self.two.path)])
+        self.plugin.sync_playlists(self.lib, self.options(arguments=("--force",)), [])
+        self.assertEqual(self.plugin._read_playlist(path, self.playlists),
+                         [os.fsdecode(self.two.path)])
+        self.assertIn("P_alice_favourites.m3u", os.listdir(self.playlists))
+
+    def test_plain_and_encoded_duplicate_local_identity_is_rejected(self):
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.local_playlist("favourites")
+        with self.assertRaisesRegex(ui.UserError, "Ambiguous local playlist identity"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_escaped_reserved_prefix_local_playlist_creation(self):
+        self.local_playlist("%47_fake_name")
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "-p", "G_fake_name")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "G_fake_name", ["1"], None, library="personal"
+        )
+
+    def test_export_ids_are_refreshed_from_api_not_stored(self):
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.client.playlists.return_value[0]["id"] = "replacement_id"
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--force")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1", "2"], "replacement_id", library="personal"
+        )
+
+    def test_imported_flat_files_are_beets_playlist_query_compatible(self):
+        for relative in ("playlist", "library", self.root):
+            with self.subTest(relative=relative):
+                config["playlist"]["relative_to"] = relative
+                self.plugin.sync_playlists(
+                    self.lib, self.options(arguments=("--force",)), ["title:one"]
+                )
+                query = PlaylistQuery("playlist", "P_alice_favourites", True)
+                self.assertEqual([item.id for item in self.lib.items(query)], [self.one.id])
 
     def test_force_scopes(self):
         opts = SimpleNamespace(force=False)
