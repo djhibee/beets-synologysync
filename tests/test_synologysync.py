@@ -1286,7 +1286,12 @@ class PluginTest(unittest.TestCase):
         parse = self.prepare_ratings()
         self.one["userrating"] = {"other": 3}
         self.one.store()
-        self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        with patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.assertIn(
+            ("Synced rating {} to {}: {}", 8, "beet", self.one.path),
+            [c.args for c in info.call_args_list],
+        )
         self.one.load()
         self.two.load()
         self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
@@ -1385,10 +1390,15 @@ class PluginTest(unittest.TestCase):
         self.one["userrating"] = {"beets-bob": 7, "other": 10}
         self.one.store()
         self.client.songs.return_value[0]["additional"]["song_rating"]["rating"] = 2
-        self.plugin.sync_ratings(
-            self.lib, self.options(0, ("--dest=syno", "--beetuser=bob", "--force")), []
-        )
+        with patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--dest=syno", "--beetuser=bob", "--force")), []
+            )
         self.client.set_rating.assert_called_once_with("1", 4)
+        self.assertIn(
+            ("Synced rating {} to {}: {}", 4, "syno", self.one.path),
+            [c.args for c in info.call_args_list],
+        )
 
     def test_existing_rating_keep_and_force(self):
         parse = self.prepare_ratings()
