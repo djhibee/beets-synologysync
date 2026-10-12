@@ -250,12 +250,12 @@ class AudioStation:
             if not entries or offset >= data.get("total", offset):
                 break
 
-    def songs(self, rating=None, keyword=None):
+    def songs(self, rating=None, title=None):
         filters = {}
         if rating is not None:
             filters = {"song_rating_meq": rating, "song_rating_leq": rating}
-        if keyword is not None:
-            filters["keyword"] = keyword
+        if title is not None:
+            filters["title"] = title
             method = "search"
         else:
             method = "list"

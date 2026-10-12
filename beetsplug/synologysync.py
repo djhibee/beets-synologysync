@@ -279,13 +279,18 @@ class SynologySyncPlugin(BeetsPlugin):
                             item.path,
                         )
                     continue
+                if songs is None and not item.title:
+                    self._log.debug(
+                        "Item has no title, indexing AudioStation library: {}",
+                        item.path,
+                    )
+                    songs = self._song_index(client, rating=remote_filter)
                 if songs is not None:
                     song = songs.get(syno_path)
                 else:
-                    filename = os.path.basename(os.fsdecode(item.path))
                     song = None
                     for candidate in client.songs(
-                        keyword=filename, rating=remote_filter
+                        title=item.title, rating=remote_filter
                     ):
                         if song_path(candidate) == syno_path:
                             if song is not None and song["id"] != candidate["id"]:
@@ -302,9 +307,9 @@ class SynologySyncPlugin(BeetsPlugin):
                         )
                     else:
                         self._log.debug(
-                            "Mapped path '{}' not found in AudioStation for keyword '{}'",
+                            "Mapped path '{}' not found in AudioStation for title '{}'",
                             syno_path,
-                            os.path.basename(os.fsdecode(item.path)),
+                            item.title,
                         )
                     if remote_filter is None:
                         self._log.warning(

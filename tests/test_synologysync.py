@@ -193,6 +193,20 @@ class ClientTest(unittest.TestCase):
                     self.assertEqual(call.kwargs["song_rating_leq"], rating)
                     self.assertEqual(call.kwargs["additional"], "song_rating")
 
+    def test_title_search_is_preserved_across_pages(self):
+        client = AudioStation.__new__(AudioStation)
+        client.call = Mock(side_effect=[
+            {"songs": [{"id": "1"}], "total": 2},
+            {"songs": [{"id": "2"}], "total": 2},
+        ])
+        self.assertEqual(
+            list(client.songs(title="Irreplaceable")), [{"id": "1"}, {"id": "2"}]
+        )
+        for call in client.call.call_args_list:
+            self.assertEqual(call.args, ("SYNO.AudioStation.Song", "search"))
+            self.assertEqual(call.kwargs["title"], "Irreplaceable")
+            self.assertNotIn("keyword", call.kwargs)
+
     def test_missing_playlist_membership_is_not_treated_as_empty(self):
         client = AudioStation.__new__(AudioStation)
         client.call = Mock(return_value={"playlists": [{"additional": {}}]})
@@ -1297,7 +1311,7 @@ class PluginTest(unittest.TestCase):
         self.plugin.sync_ratings(
             self.lib, self.options(0, ("--rating=8",)), ["title:two"]
         )
-        self.client.songs.assert_called_once_with(keyword="two.mp3", rating=4)
+        self.client.songs.assert_called_once_with(title="two", rating=4)
         self.one.load()
         self.two.load()
         self.assertEqual(parse(self.one.get("userrating")), {})
@@ -1476,7 +1490,7 @@ class PluginTest(unittest.TestCase):
             {"id": "1", "path": "/music/one.mp3", "additional": {"song_rating": {"rating": 4}}}
         ]
         self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
-        self.client.songs.assert_called_once_with(keyword="one.mp3", rating=None)
+        self.client.songs.assert_called_once_with(title="one", rating=None)
 
         # Configured threshold = 1: 1 item matching query >= threshold -> global call
         self.plugin.config["SingleAPICallThreshold"] = 1
