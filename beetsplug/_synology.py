@@ -3,22 +3,17 @@
 import json
 import posixpath
 import ssl
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
+
+import urllib3
 
 
 class SynologyError(Exception):
     pass
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise SynologyError("AudioStation redirects are not allowed")
-
-
-class AudioStation:
-    def __init__(self, url, username, password, ca_file=None, timeout=30):
+def _https_url(url, name):
+    try:
         parts = urlsplit(url)
         if (
             parts.scheme != "https"
@@ -27,28 +22,58 @@ class AudioStation:
             or parts.password is not None
             or parts.query
             or parts.fragment
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url)
+            or "\\" in url
         ):
-            raise SynologyError("url must be an HTTPS URL without credentials or query")
-        self.base = url.rstrip("/") + "/webapi/"
+            raise ValueError
+        parts.port
+    except ValueError:
+        raise SynologyError(
+            f"{name} must be an HTTPS URL without credentials or query"
+        ) from None
+    return parts
+
+
+class AudioStation:
+    def __init__(self, url, username, password, ca_file=None, timeout=30, public_url=None):
+        parts = _https_url(url, "url")
+        identity = _https_url(public_url, "public_url") if public_url else parts
+        if public_url and identity.path not in ("", "/"):
+            raise SynologyError("public_url must not contain a path")
+        self.base = parts.path.rstrip("/") + "/webapi/"
         self.timeout = timeout
         self.sid = None
         self.apis = {}
-        self.opener = build_opener(
-            HTTPSHandler(context=ssl.create_default_context(cafile=ca_file)),
-            _NoRedirect(),
+        self.headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Host": identity.netloc,
+        }
+        self.pool = urllib3.HTTPSConnectionPool(
+            parts.hostname,
+            port=parts.port or 443,
+            ssl_context=ssl.create_default_context(cafile=ca_file),
+            cert_reqs=ssl.CERT_REQUIRED,
+            server_hostname=identity.hostname,
+            assert_hostname=identity.hostname,
+            timeout=timeout,
+            retries=False,
         )
-        self.apis = self._request(
-            "query.cgi",
-            {"api": "SYNO.API.Info", "version": 1, "method": "query", "query": "all"},
-        )
-        self.sid = self.call(
-            "SYNO.API.Auth",
-            "login",
-            account=username,
-            passwd=password,
-            session="AudioStation",
-            format="sid",
-        )["sid"]
+        try:
+            self.apis = self._request(
+                "query.cgi",
+                {"api": "SYNO.API.Info", "version": 1, "method": "query", "query": "all"},
+            )
+            self.sid = self.call(
+                "SYNO.API.Auth",
+                "login",
+                account=username,
+                passwd=password,
+                session="AudioStation",
+                format="sid",
+            )["sid"]
+        except Exception:
+            self.pool.close()
+            raise
 
     def _request(self, path, params):
         if (
@@ -61,16 +86,22 @@ class AudioStation:
             or urlsplit(path).fragment
         ):
             raise SynologyError("Invalid AudioStation API path")
-        request = Request(
-            self.base + path,
-            data=urlencode(params).encode("utf-8"),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
-                payload = json.load(response)
-        except (HTTPError, URLError, OSError, ValueError):
+            response = self.pool.request(
+                "POST",
+                self.base + path,
+                body=urlencode(params).encode("utf-8"),
+                headers=self.headers,
+                timeout=self.timeout,
+                redirect=False,
+                retries=False,
+            )
+            if 300 <= response.status < 400:
+                raise SynologyError("AudioStation redirects are not allowed")
+            if response.status != 200:
+                raise SynologyError("AudioStation HTTPS request failed")
+            payload = json.loads(response.data)
+        except (urllib3.exceptions.HTTPError, OSError, ValueError):
             # Do not expose requests containing credentials or session tokens.
             raise SynologyError("AudioStation HTTPS request failed") from None
         if not isinstance(payload, dict) or not payload.get("success"):
@@ -89,11 +120,12 @@ class AudioStation:
         return self._request(info["path"], params)
 
     def close(self):
-        if self.sid:
-            try:
+        try:
+            if self.sid:
                 self.call("SYNO.API.Auth", "logout", session="AudioStation")
-            finally:
-                self.sid = None
+        finally:
+            self.sid = None
+            self.pool.close()
 
     def _list(self, api, method, key, **params):
         offset = 0

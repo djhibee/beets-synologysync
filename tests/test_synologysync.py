@@ -1,5 +1,4 @@
 import ast
-import io
 import json
 import os
 import ssl
@@ -14,7 +13,7 @@ from beets import config, ui
 from beets.dbcore import types
 from beets.library import Item, Library
 from beets.plugins import BeetsPlugin
-from beetsplug._synology import AudioStation, SynologyError, _NoRedirect
+from beetsplug._synology import AudioStation, SynologyError
 from beetsplug.playlist import PlaylistPlugin
 from beetsplug.synologysync import PathMapping, SynologySyncPlugin, _playlist_name
 
@@ -31,29 +30,56 @@ class RatingsType(types.Type):
 
 class ClientTest(unittest.TestCase):
     def test_requires_https_without_embedded_credentials(self):
-        for url in ("http://nas", "******nas", "https://nas/?token=bad"):
+        for url in ("http://nas", "https://user@nas", "https://nas/?token=bad"):
             with self.subTest(url=url), self.assertRaises(SynologyError):
                 AudioStation(url, "user", "secret")
 
     def test_credentials_are_posted_and_endpoint_is_discovered(self):
-        opener = Mock()
-        opener.open.side_effect = [
-            io.BytesIO(json.dumps({"success": True, "data": {
+        pool = Mock()
+        pool.request.side_effect = [
+            Mock(status=200, data=json.dumps({"success": True, "data": {
                 "SYNO.API.Auth": {"path": "auth.cgi", "minVersion": 1, "maxVersion": 7}
             }}).encode()),
-            io.BytesIO(b'{"success":true,"data":{"sid":"session"}}'),
-            io.BytesIO(b'{"success":true}'),
+            Mock(status=200, data=b'{"success":true,"data":{"sid":"session"}}'),
+            Mock(status=200, data=b'{"success":true}'),
         ]
-        with patch("beetsplug._synology.build_opener", return_value=opener):
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool", return_value=pool):
             client = AudioStation("https://nas:5001", "user", "secret")
             client.close()
-        login = opener.open.call_args_list[1].args[0]
-        self.assertEqual(login.full_url, "https://nas:5001/webapi/auth.cgi")
-        self.assertEqual(login.method, "POST")
-        self.assertIn(b"passwd=secret", login.data)
-        self.assertNotIn("secret", login.full_url)
+        login = pool.request.call_args_list[1]
+        self.assertEqual(login.args, ("POST", "/webapi/auth.cgi"))
+        self.assertIn(b"passwd=secret", login.kwargs["body"])
+        self.assertNotIn("secret", login.args[1])
+        self.assertEqual(login.kwargs["headers"]["Host"], "nas:5001")
+        self.assertFalse(login.kwargs["redirect"])
+        self.assertFalse(login.kwargs["retries"])
         self.assertIsNone(client.sid)
-        self.assertIn(b"_sid=session", opener.open.call_args_list[2].args[0].data)
+        self.assertIn(b"_sid=session", pool.request.call_args_list[2].kwargs["body"])
+        pool.close.assert_called_once()
+
+    def test_public_url_separates_connection_and_tls_identity(self):
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
+            build.return_value.request.side_effect = OSError("connection refused")
+            with self.assertRaises(SynologyError):
+                AudioStation("https://192.168.1.10:5001", "user", "secret",
+                             public_url="https://nas.example.org:443")
+        self.assertEqual(build.call_args.args, ("192.168.1.10",))
+        self.assertEqual(build.call_args.kwargs["port"], 5001)
+        self.assertEqual(build.call_args.kwargs["server_hostname"], "nas.example.org")
+        self.assertEqual(build.call_args.kwargs["assert_hostname"], "nas.example.org")
+        headers = build.return_value.request.call_args.kwargs["headers"]
+        self.assertEqual(headers["Host"], "nas.example.org:443")
+        build.return_value.close.assert_called_once()
+
+    def test_public_url_validation(self):
+        urls = ("http://nas", "https://user@nas", "https://nas/api",
+                "https://nas/?x=1", "https://nas/#fragment", "https://nas:invalid",
+                "https://nas\r\nHost: other", "https://nas\\other")
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
+            for url in urls:
+                with self.subTest(url=url), self.assertRaises(SynologyError):
+                    AudioStation("https://127.0.0.1", "user", "secret", public_url=url)
+            build.assert_not_called()
 
     def test_api_path_cannot_escape_origin(self):
         client = AudioStation.__new__(AudioStation)
@@ -105,17 +131,40 @@ class ClientTest(unittest.TestCase):
                          {"id": "new", "offset": 0, "limit": 0, "songs": ""})
 
     def test_redirects_are_refused(self):
-        with self.assertRaises(SynologyError):
-            _NoRedirect().redirect_request(None, None, 307, "", {}, "http://other")
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
+            build.return_value.request.return_value = Mock(status=307)
+            with self.assertRaisesRegex(SynologyError, "redirects are not allowed"):
+                AudioStation("https://nas", "user", "secret")
+        self.assertEqual(build.return_value.request.call_count, 1)
+        self.assertFalse(build.return_value.request.call_args.kwargs["redirect"])
 
     def test_tls_context_verifies_certificate_and_hostname(self):
-        with patch("beetsplug._synology.build_opener") as build:
-            build.return_value.open.side_effect = OSError("connection refused")
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
+            build.return_value.request.side_effect = OSError("connection refused")
             with self.assertRaises(SynologyError):
                 AudioStation("https://nas", "user", "secret")
-        context = build.call_args.args[0]._context
+        context = build.call_args.kwargs["ssl_context"]
         self.assertTrue(context.check_hostname)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertEqual(build.call_args.kwargs["assert_hostname"], "nas")
+        self.assertEqual(build.call_args.kwargs["server_hostname"], "nas")
+
+    def test_pool_is_closed_even_if_logout_fails(self):
+        client = AudioStation.__new__(AudioStation)
+        client.sid = "session"
+        client.pool = Mock()
+        client.call = Mock(side_effect=SynologyError("logout failed"))
+        with self.assertRaises(SynologyError):
+            client.close()
+        self.assertIsNone(client.sid)
+        client.pool.close.assert_called_once()
+
+    def test_transport_errors_do_not_expose_credentials(self):
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
+            build.return_value.request.side_effect = OSError("passwd=sensitive-value")
+            with self.assertRaisesRegex(SynologyError, "^AudioStation HTTPS request failed$"):
+                AudioStation("https://nas", "user", "sensitive-value")
+        build.return_value.close.assert_called_once()
 
 
 class PluginTest(unittest.TestCase):
@@ -172,6 +221,14 @@ class PluginTest(unittest.TestCase):
 
     def options(self, command=1, arguments=()):
         return self.plugin.commands()[command].parser.parse_args(list(arguments))[0]
+
+    def test_public_url_is_passed_to_client_with_cli_connection_override(self):
+        self.plugin.config["public_url"] = "https://nas.example.org:5001"
+        opts = self.options(arguments=("--url=https://192.168.1.10:5001",))
+        self.plugin.sync_playlists(self.lib, opts, ["title:one"])
+        call = self.client_patch.target.AudioStation.call_args
+        self.assertEqual(call.args[0], "https://192.168.1.10:5001")
+        self.assertEqual(call.kwargs["public_url"], "https://nas.example.org:5001")
 
     def test_playlist_command_name_and_options(self):
         commands = self.plugin.commands()

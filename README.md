@@ -25,6 +25,7 @@ plugins: [userrating, playlist, synologysync]
 
 synologysync:
   host: https://nas.example.org:5001
+  # public_url: https://nas.example.org:5001
   synouser: alice
   # beetuser: alice  # defaults to synouser
   path_mapping:
@@ -59,6 +60,33 @@ forwarding credentials. Passwords are prompted for every invocation, sent only
 in HTTPS POST bodies, and never stored in configuration or the library. Sessions
 are logged out on completion, including when synchronization fails. Grant the
 Synology account AudioStation access and write permissions for exports.
+
+### Connect to a local IP using a public certificate
+
+To connect directly to your NAS's local IP without changing DNS or your hosts
+file, set `host` to the local HTTPS address and `public_url` to the HTTPS origin
+whose hostname is covered by the certificate:
+
+```yaml
+synologysync:
+  host: https://192.168.1.10:5001
+  public_url: https://nas.example.org:5001
+```
+
+The urllib3 client connects to the address and port in `host` (or `--url`),
+but uses the hostname in `public_url` for TLS SNI and certificate hostname
+verification. The HTTP `Host` header uses the authority from `public_url`,
+including its port if specified. The public hostname is not resolved or
+contacted. Connection ports may differ; `public_url` never changes the actual
+connection destination or API path.
+
+`public_url` is optional and must be an HTTPS origin, without credentials,
+query, fragment, or a path other than `/`. When omitted, the connection URL
+determines both TLS identity and `Host`, as before. Certificate verification
+remains mandatory: the certificate must be valid and trusted, and cover the
+public hostname. Use `ca_file` for a private CA; this setting does not accept
+expired, untrusted, or mismatched certificates. Redirects remain forbidden,
+and authenticated requests are not automatically retried.
 
 ## Ratings
 
@@ -123,3 +151,8 @@ python -m unittest discover -s tests -v
 Tests use a temporary beets database and mocked AudioStation transport. A real
 NAS is not needed for the tests; verify API compatibility and account permissions
 on your AudioStation installation before performing a bulk export.
+Local HTTPS tests additionally generate temporary CA and server certificates
+with OpenSSL and verify certificate checks, SNI, `Host`, and redirect rejection
+over loopback. Those tests are skipped if the `openssl` executable is unavailable;
+generated private keys are kept only in temporary directories and removed after
+testing.

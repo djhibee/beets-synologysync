@@ -52,6 +52,7 @@ class SynologySyncPlugin(BeetsPlugin):
         self.config.add(
             {
                 "host": "",
+                "public_url": "",
                 "synouser": "",
                 "beetuser": "",
                 "path_mapping": [],
@@ -127,6 +128,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 if self.config["ca_file"].get(str)
                 else None,
                 timeout=self.config["timeout"].get(float),
+                public_url=self.config["public_url"].get(str) or None,
             )
             yield client
         except (SynologyError, OSError, ValueError) as exc:

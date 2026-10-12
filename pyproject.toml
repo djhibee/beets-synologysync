@@ -9,7 +9,7 @@ description = "Synchronize Synology AudioStation ratings and playlists with beet
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-only"
-dependencies = ["beets>=2.0"]
+dependencies = ["beets>=2.0", "urllib3>=2.8.0,<3"]
 
 [tool.setuptools.packages.find]
 include = ["beetsplug*"]
