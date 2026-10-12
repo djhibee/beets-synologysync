@@ -432,7 +432,9 @@ class SynologySyncPlugin(BeetsPlugin):
                     item.store()
                 else:
                     client.set_rating(song["id"], source)
-                self._log.info("Synced rating to {}: {}", opts.dest, item.path)
+                self._log.info(
+                    "Synced rating {} to {}: {}", source, opts.dest, item.path
+                )
 
     def _playlist_settings(self):
         self._plugin("playlist")
