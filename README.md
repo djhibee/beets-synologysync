@@ -142,6 +142,11 @@ or artist fall back to the global index. When running without a query (targeting
 or when the query result size meets or exceeds `SingleAPICallThreshold`, the plugin
 fetches and indexes all songs in AudioStation once using a global query.
 
+When a song cannot be found, the plugin logs the AudioStation songs that have the
+same file name, which usually reveals a `path_mapping` mismatch. Run beets with
+`-v` to also log the `path_mapping` rule applied to each item and every
+AudioStation path compared against the mapped path.
+
 ## Playlists
 
 ```sh
