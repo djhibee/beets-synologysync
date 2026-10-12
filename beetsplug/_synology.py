@@ -174,11 +174,14 @@ class AudioStation:
         concealed = _conceal_sensitive(params)
         if method:
             self.log.info(
-                f"Calling AudioStation API: {api} ({method}) with params: {concealed}"
+                "Calling AudioStation API: {} ({}) with params: {}",
+                api,
+                method,
+                concealed,
             )
         else:
             self.log.info(
-                f"Calling AudioStation API: {api} with params: {concealed}"
+                "Calling AudioStation API: {} with params: {}", api, concealed
             )
         try:
             response = self.pool.request(
@@ -198,11 +201,11 @@ class AudioStation:
         except (urllib3.exceptions.HTTPError, OSError, ValueError):
             if method:
                 self.log.warning(
-                    f"AudioStation HTTPS request failed for {api} ({method})"
+                    "AudioStation HTTPS request failed for {} ({})", api, method
                 )
             else:
                 self.log.warning(
-                    f"AudioStation HTTPS request failed for {api}"
+                    "AudioStation HTTPS request failed for {}", api
                 )
             # Do not expose requests containing credentials or session tokens.
             raise SynologyError("AudioStation HTTPS request failed") from None
@@ -211,11 +214,11 @@ class AudioStation:
             code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
             if method:
                 self.log.warning(
-                    f"AudioStation API error ({code}) for {api} ({method})"
+                    "AudioStation API error ({}) for {} ({})", code, api, method
                 )
             else:
                 self.log.warning(
-                    f"AudioStation API error ({code}) for {api}"
+                    "AudioStation API error ({}) for {}", code, api
                 )
             raise SynologyError(f"AudioStation API error ({code})")
         return payload.get("data", {})
