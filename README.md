@@ -135,8 +135,10 @@ When querying a small number of items, fetching and indexing the entire AudioSta
 library is unnecessary. If a beets query is provided and matches fewer items than
 `SingleAPICallThreshold` (default `100`), the plugin avoids indexing all songs in
 AudioStation. Instead, it queries AudioStation for each item by searching for its
-filename (`method=search` with `keyword=<filename>`) and filters the returned
-candidates by mapped path. When running without a query (targeting the entire library)
+title (`method=search` with `title=<title>`) and filters the returned candidates
+by mapped path. If the song is not found, it retries with `album=<album>`, then
+with `artist=<artist>` (empty fields are skipped). Items without a title, album
+or artist fall back to the global index. When running without a query (targeting the entire library)
 or when the query result size meets or exceeds `SingleAPICallThreshold`, the plugin
 fetches and indexes all songs in AudioStation once using a global query.
 
