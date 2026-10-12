@@ -1323,6 +1323,77 @@ class PluginTest(unittest.TestCase):
             self.plugin.sync_ratings(self.lib, self.options(0), [])
         self.client.close.assert_called_once()
 
+    def test_sync_ratings_progress_and_connection_logs(self):
+        self.prepare_ratings()
+        with patch.object(self.plugin._log, "info") as log_info:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        calls = [c.args[0] for c in log_info.call_args_list]
+        self.assertIn("Connecting to AudioStation...", calls)
+        self.assertIn("Connected to AudioStation", calls)
+        self.assertIn("Fetching songs from AudioStation...", calls)
+        self.assertIn("Indexed {} songs from AudioStation", calls)
+        self.assertIn("Processing song ({}/{}): {}", calls)
+
+    def test_song_index_pagination_progress_log(self):
+        many_songs = [
+            {"id": str(i), "path": f"/music/{i}.mp3", "additional": {"song_rating": {"rating": 0}}}
+            for i in range(1005)
+        ]
+        self.client.songs.return_value = many_songs
+        with patch.object(self.plugin._log, "info") as log_info:
+            self.plugin._song_index(self.client)
+        calls = [c.args[0] for c in log_info.call_args_list]
+        self.assertIn("Fetching songs from AudioStation...", calls)
+        self.assertIn("Fetched {} songs from AudioStation...", calls)
+        self.assertIn("Indexed {} songs from AudioStation", calls)
+
+    def test_missing_mapped_song_warning_unmatched_local_path(self):
+        self.prepare_ratings()
+        unmapped_item = Item(
+            path=os.fsencode("/different/directory/unmapped.mp3"), title="unmapped"
+        )
+        self.lib.add(unmapped_item)
+        with patch.object(self.plugin._log, "warning") as warning:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:unmapped"])
+        warning.assert_called_once()
+        self.assertEqual(
+            warning.call_args.args[0],
+            "No mapped AudioStation song for {}: path does not match any path_mapping",
+        )
+        self.assertEqual(warning.call_args.args[1], unmapped_item.path)
+
+    def test_missing_mapped_song_warning_unmatched_remote_path(self):
+        self.prepare_ratings()
+        item_three = Item(
+            path=os.fsencode(os.path.join(self.music, "three.mp3")), title="three"
+        )
+        self.lib.add(item_three)
+        with patch.object(self.plugin._log, "warning") as warning:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:three"])
+        warning.assert_called_once()
+        self.assertEqual(
+            warning.call_args.args[0],
+            "No mapped AudioStation song for {}: mapped path '{}' not found in AudioStation",
+        )
+        self.assertEqual(warning.call_args.args[1], item_three.path)
+        self.assertEqual(warning.call_args.args[2], "/music/three.mp3")
+
+    def test_playlist_export_missing_mapped_song_distinguishes_reasons(self):
+        # Entry outside path_mapping
+        self.local_playlist("unmapped_playlist", ["/outside/unmapped.mp3"])
+        with self.assertRaisesRegex(ui.UserError, "path does not match any path_mapping"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "-p", "unmapped_playlist")), []
+            )
+
+        # Entry within path_mapping but not indexed in AudioStation
+        missing_remote = os.path.join(self.music, "nonexistent.mp3")
+        self.local_playlist("missing_remote_playlist", [missing_remote])
+        with self.assertRaisesRegex(ui.UserError, "not found in AudioStation"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "-p", "missing_remote_playlist")), []
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
