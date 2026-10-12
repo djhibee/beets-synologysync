@@ -65,6 +65,22 @@ class ClientTest(unittest.TestCase):
         self.assertIn(b"_sid=session", pool.request.call_args_list[2].kwargs["body"])
         pool.close.assert_called_once()
 
+    def test_request_logging_formats_params_with_braces(self):
+        pool = Mock()
+        pool.request.side_effect = [
+            Mock(status=200, data=json.dumps({"success": True, "data": {
+                "SYNO.API.Auth": {"path": "auth.cgi", "minVersion": 1, "maxVersion": 7}
+            }}).encode()),
+            Mock(status=200, data=b'{"success":true,"data":{"sid":"session"}}'),
+        ]
+        with patch("beetsplug._synology.urllib3.HTTPSConnectionPool", return_value=pool), \
+                self.assertLogs("beets.synologysync", level="INFO") as logs:
+            AudioStation("https://nas:5001", "user", "secret")
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("'api': 'SYNO.API.Info'", messages[0])
+        self.assertIn("'passwd': '***'", messages[1])
+        self.assertNotIn("secret", "\n".join(messages))
+
     def test_public_url_separates_connection_and_tls_identity(self):
         with patch("beetsplug._synology.urllib3.HTTPSConnectionPool") as build:
             build.return_value.request.side_effect = OSError("connection refused")
@@ -279,7 +295,9 @@ class ClientTest(unittest.TestCase):
             client.close()
 
         info_calls = log_mock.info.call_args_list
-        all_logged_text = " ".join(str(call) for call in info_calls)
+        all_logged_text = " ".join(
+            call.args[0].format(*call.args[1:]) for call in info_calls
+        )
 
         self.assertNotIn("secret-password", all_logged_text)
         self.assertNotIn("super-secret-token", all_logged_text)
