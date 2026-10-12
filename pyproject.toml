@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beets-synologysync"
+version = "0.1.0"
+description = "Synchronize Synology AudioStation ratings and playlists with beets"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+dependencies = ["beets>=2.0", "urllib3>=2.8.0,<3"]
+
+[tool.setuptools.packages.find]
+include = ["beetsplug*"]
+namespaces = true
