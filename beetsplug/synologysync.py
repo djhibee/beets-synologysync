@@ -348,7 +348,8 @@ class SynologySyncPlugin(BeetsPlugin):
                                 "Comparing AudioStation path '{}' with mapped path '{}': {}",
                                 candidate_path,
                                 syno_path,
-                                "match" if matched else "no match",
+                                ui.colorize("text_success", "match")
+                                if matched else "no match",
                             )
                             candidates.append(candidate_path)
                             if matched:

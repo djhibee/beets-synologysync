@@ -1500,6 +1500,24 @@ class PluginTest(unittest.TestCase):
             for c in info_calls
         ))
 
+    def test_per_song_search_logs_match_in_green(self):
+        self.prepare_ratings()
+        self.client.songs.reset_mock()
+        self.client.songs.side_effect = None
+        self.client.songs.return_value = [
+            {"id": "1", "path": "/music/one.mp3",
+             "additional": {"song_rating": {"rating": 4}}}
+        ]
+        with patch.object(self.plugin._log, "debug") as debug, \
+                patch("beetsplug.synologysync.ui.colorize",
+                      side_effect=lambda color, text: f"<{color}>{text}") as colorize:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        colorize.assert_any_call("text_success", "match")
+        self.assertIn((
+            "Comparing AudioStation path '{}' with mapped path '{}': {}",
+            "/music/one.mp3", "/music/one.mp3", "<text_success>match",
+        ), [c.args for c in debug.call_args_list])
+
     def test_playlist_export_missing_mapped_song_distinguishes_reasons(self):
         # Entry outside path_mapping
         item_unmapped = Item(path=b"/outside/unmapped.mp3", title="unmapped")
