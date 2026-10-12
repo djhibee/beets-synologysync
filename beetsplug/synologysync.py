@@ -73,8 +73,8 @@ class SynologySyncPlugin(BeetsPlugin):
     def commands(self):
         commands = []
         for name, handler in (
-            ("syncRatings", self.sync_ratings),
-            ("syncPlaylist", self.sync_playlists),
+            ("syncSynoRatings", self.sync_ratings),
+            ("syncSynoPlaylist", self.sync_playlists),
         ):
             command = ui.Subcommand(name, help="synchronize with Synology AudioStation")
             command.parser.add_option("--url", help="HTTPS AudioStation base URL")
@@ -86,7 +86,7 @@ class SynologySyncPlugin(BeetsPlugin):
             command.parser.add_option(
                 "--force", action="store_true", default=False, help="overwrite conflicts"
             )
-            if name == "syncPlaylist":
+            if name == "syncSynoPlaylist":
                 command.parser.add_option("-p", "--playlist", help="playlist name")
                 command.parser.add_option(
                     "--library", type="choice", choices=("all", "personal", "shared"),

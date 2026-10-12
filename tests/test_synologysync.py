@@ -313,7 +313,7 @@ class PluginTest(unittest.TestCase):
     def test_playlist_command_name_and_options(self):
         commands = self.plugin.commands()
         self.assertEqual([command.name for command in commands],
-                         ["syncRatings", "syncPlaylist"])
+                         ["syncSynoRatings", "syncSynoPlaylist"])
         command = commands[1]
         self.assertEqual(command.func, self.plugin.sync_playlists)
         opts, args = command.parser.parse_args(

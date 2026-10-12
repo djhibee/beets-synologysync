@@ -96,9 +96,9 @@ and authenticated requests are not automatically retried.
 ## Ratings
 
 ```sh
-beet syncRatings artist:Example
-beet syncRatings --dest=syno --force album:Example
-beet syncRatings --url=https://nas.example.org:5001 --synouser=alice --beetuser=bob
+beet syncSynoRatings artist:Example
+beet syncSynoRatings --dest=syno --force album:Example
+beet syncSynoRatings --url=https://nas.example.org:5001 --synouser=alice --beetuser=bob
 ```
 
 The default destination is `beet`; `--dest=syno` exports to AudioStation.
@@ -120,12 +120,12 @@ Equal ratings require no change.
 ## Playlists
 
 ```sh
-beet syncPlaylist
-beet syncPlaylist -p favourites artist:Example
-beet syncPlaylist --dest=syno --conflict=merge
-beet syncPlaylist --dest=syno --force -p favourites
-beet syncPlaylist --library=shared
-beet syncPlaylist --dest=syno --force -p G_alice_favourites
+beet syncSynoPlaylist
+beet syncSynoPlaylist -p favourites artist:Example
+beet syncSynoPlaylist --dest=syno --conflict=merge
+beet syncSynoPlaylist --dest=syno --force -p favourites
+beet syncSynoPlaylist --library=shared
+beet syncSynoPlaylist --dest=syno --force -p G_alice_favourites
 ```
 
 This command works in both directions.
