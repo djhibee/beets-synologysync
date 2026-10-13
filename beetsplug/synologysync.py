@@ -229,6 +229,44 @@ class SynologySyncPlugin(BeetsPlugin):
                 "No AudioStation song returned with file name '{}'", name
             )
 
+    def _search_song(self, client, searches, syno_path, rating=None):
+        """Find a song by mapped path through Song search by title, album, artist."""
+        song = None
+        candidates = []
+        for field, value in searches:
+            results = list(client.songs(rating=rating, **{field: value}))
+            self._log.debug(
+                "AudioStation search by {} '{}' returned {} songs",
+                field,
+                value,
+                len(results),
+            )
+            for candidate in results:
+                candidate_path = song_path(candidate)
+                matched = candidate_path == syno_path
+                self._log.debug(
+                    "Comparing AudioStation path '{}' with mapped path '{}': {}",
+                    candidate_path,
+                    syno_path,
+                    "match" if matched else "no match",
+                )
+                candidates.append(candidate_path)
+                if matched:
+                    if song is not None and song["id"] != candidate["id"]:
+                        raise ui.UserError(
+                            f"Ambiguous AudioStation song path: {syno_path}"
+                        )
+                    song = candidate
+            if song is not None:
+                break
+            self._log.debug(
+                "Mapped path '{}' not found in AudioStation for {} '{}'",
+                syno_path,
+                field,
+                value,
+            )
+        return song, candidates
+
     def _plugin(self, name):
         for plugin in plugins.find_plugins():
             if plugin.name == name:
@@ -326,45 +364,13 @@ class SynologySyncPlugin(BeetsPlugin):
                         item.path,
                     )
                     songs = self._song_index(client, rating=remote_filter)
+                candidates = []
                 if songs is not None:
                     song = songs.get(syno_path)
                 else:
-                    song = None
-                    candidates = []
-                    for field, value in searches:
-                        results = list(client.songs(
-                            rating=remote_filter, **{field: value}
-                        ))
-                        self._log.debug(
-                            "AudioStation search by {} '{}' returned {} songs",
-                            field,
-                            value,
-                            len(results),
-                        )
-                        for candidate in results:
-                            candidate_path = song_path(candidate)
-                            matched = candidate_path == syno_path
-                            self._log.debug(
-                                "Comparing AudioStation path '{}' with mapped path '{}': {}",
-                                candidate_path,
-                                syno_path,
-                                "match" if matched else "no match",
-                            )
-                            candidates.append(candidate_path)
-                            if matched:
-                                if song is not None and song["id"] != candidate["id"]:
-                                    raise ui.UserError(
-                                        f"Ambiguous AudioStation song path: {syno_path}"
-                                    )
-                                song = candidate
-                        if song is not None:
-                            break
-                        self._log.debug(
-                            "Mapped path '{}' not found in AudioStation for {} '{}'",
-                            syno_path,
-                            field,
-                            value,
-                        )
+                    song, candidates = self._search_song(
+                        client, searches, syno_path, rating=remote_filter
+                    )
                 if song is None:
                     if songs is not None:
                         self._log.debug(
@@ -520,7 +526,7 @@ class SynologySyncPlugin(BeetsPlugin):
         directory, base = self._playlist_settings()
         mapping = self._mapping()
         items = list(lib.items(ui.decargs(args)))
-        selected = {os.path.abspath(os.fsdecode(item.path)) for item in items}
+        selected = {os.path.abspath(os.fsdecode(item.path)): item for item in items}
         if args and not selected:
             self._log.info("No items match the query")
             return
@@ -543,7 +549,6 @@ class SynologySyncPlugin(BeetsPlugin):
                 if identity in remote:
                     raise ui.UserError(f"Ambiguous AudioStation playlist identity: {identity}")
                 remote[identity] = playlist
-            songs = self._song_index(client)
             if opts.dest == "beet":
                 imported = {}
                 for identity, playlist in remote.items():
@@ -602,7 +607,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 if opts.playlist and opts.playlist not in local and len(targets) > 1:
                     raise ui.UserError("Ambiguous playlist selection; use the exact generated stem")
                 self._playlists_to_syno(
-                    client, opts, mapping, selected, targets, songs, base,
+                    client, opts, mapping, selected, targets, base,
                     bool(args), username,
                 )
 
@@ -636,8 +641,15 @@ class SynologySyncPlugin(BeetsPlugin):
             self._log.info("Synced playlist to beets: {}", name)
 
     def _playlists_to_syno(
-        self, client, opts, mapping, selected, targets, songs, base, queried, username
+        self, client, opts, mapping, selected, targets, base, queried, username
     ):
+        # AudioStation cannot look songs up by path: a few entries are resolved
+        # through Song search, larger exports through a single global index
+        # fetched once a selected playlist actually needs song IDs.
+        threshold = self._single_api_call_threshold()
+        songs = None
+        found = {}
+        searched = 0
         for (library, owner, name), (stem, path, existing) in targets.items():
             if existing and is_smart(existing):
                 self._log.info("Skipping smart playlist: {}", stem)
@@ -657,18 +669,42 @@ class SynologySyncPlugin(BeetsPlugin):
             policy = self._conflict(opts, name, existing is not None)
             if policy == "skip":
                 continue
-            ids = []
+            mapped = []
             for entry in entries:
                 syno_path = mapping.to_syno(entry)
-                song = songs.get(syno_path) if syno_path else None
+                if syno_path is None:
+                    raise ui.UserError(
+                        f"No mapped AudioStation song for {entry}: path does not match any path_mapping"
+                    )
+                mapped.append((entry, syno_path))
+            pending = {syno_path for _, syno_path in mapped if syno_path not in found}
+            use_search = songs is None and searched + len(pending) < threshold
+            searched += len(pending) if use_search else 0
+            ids = []
+            for entry, syno_path in mapped:
+                song = found.get(syno_path)
+                candidates = []
                 if song is None:
-                    if syno_path is None:
-                        raise ui.UserError(
-                            f"No mapped AudioStation song for {entry}: path does not match any path_mapping"
-                        )
+                    item = selected[entry]
+                    searches = [
+                        (field, item.get(field))
+                        for field in ("title", "album", "artist")
+                        if item.get(field)
+                    ]
+                    if use_search and searches:
+                        song, candidates = self._search_song(client, searches, syno_path)
+                    else:
+                        if songs is None:
+                            songs = self._song_index(client)
+                        song = songs.get(syno_path)
+                if song is None:
+                    self._log_similar_paths(
+                        syno_path, songs.keys() if songs is not None else candidates
+                    )
                     raise ui.UserError(
                         f"No mapped AudioStation song for {entry}: mapped path '{syno_path}' not found in AudioStation"
                     )
+                found[syno_path] = song
                 ids.append(song["id"])
             if policy == "merge" and existing:
                 ids = _unique(
