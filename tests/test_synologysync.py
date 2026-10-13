@@ -1378,6 +1378,28 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(parse(self.two.get("userrating")), {})
         self.client.close.assert_called_once()
 
+    def test_rating_sync_log_includes_old_and_new_values(self):
+        self.prepare_ratings()
+        with patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        info.assert_any_call(
+            "Synced rating to {}: {} (rating {} -> {})", "beet", self.one.path, None, 8
+        )
+
+    def test_matching_path_comparison_is_logged_in_green(self):
+        self.prepare_ratings()
+        with patch("beetsplug.synologysync.ui.colorize",
+                   side_effect=lambda color, text: f"<{color}>{text}") as colorize, \
+                patch.object(self.plugin._log, "debug") as debug:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        colorize.assert_any_call(
+            "text_success", "Comparing AudioStation path '{}' with mapped path '{}': {}"
+        )
+        self.assertTrue(any(
+            c.args[0].startswith("<text_success>Comparing") and c.args[3] == "match"
+            for c in debug.call_args_list
+        ))
+
     def test_rating_import_uses_fallback_username(self):
         parse = self.prepare_ratings()
         self.plugin.config["synouser"] = ""
