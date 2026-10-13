@@ -504,6 +504,31 @@ class PluginTest(unittest.TestCase):
             "favourites", ["1"], "p1", library="personal"
         )
 
+    def test_playlist_import_does_not_fetch_song_library(self):
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.client.songs.assert_not_called()
+        self.client.playlist_songs.assert_called_once_with("p1")
+
+    def test_playlist_export_skips_song_library_when_nothing_to_resolve(self):
+        path = os.path.join(self.playlists, "favourites.m3u")
+        self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.one.path)])
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("--dest=syno", "--conflict=skip")), []
+        )
+        self.client.songs.assert_not_called()
+
+    def test_playlist_export_fetches_song_library_once(self):
+        for name in ("first", "second"):
+            self.plugin._write_playlist(
+                os.path.join(self.playlists, name + ".m3u"), self.playlists,
+                [os.fsdecode(self.one.path)],
+            )
+        self.client.playlists.return_value = []
+        self.client.save_playlist.reset_mock()
+        self.plugin.sync_playlists(self.lib, self.options(arguments=("--dest=syno",)), [])
+        self.client.songs.assert_called_once_with()
+        self.assertEqual(self.client.save_playlist.call_count, 2)
+
     def test_playlist_merge_preserves_order_and_removes_duplicates(self):
         OwnerAliases(self.lib).alias("alice")
         path = os.path.join(self.playlists, "P_alice_favourites.m3u")

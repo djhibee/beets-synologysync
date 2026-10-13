@@ -166,6 +166,12 @@ It reads the playlist plugin's `playlist_dir`, `relative_to`, and
 Only accessible, non-smart playlists are imported; existing smart export targets
 are skipped, never overwritten or recreated as normal playlists.
 
+Imports only request the playlist list and the songs of the selected playlists
+(`Playlist getinfo`); the AudioStation song library is never listed. Exports
+must resolve local files to AudioStation song IDs, which the API cannot look up
+by path, so the song library is listed once, and only if at least one selected
+playlist actually needs to be written.
+
 ### Playlist identity and filenames
 
 Imports use flat filenames:
