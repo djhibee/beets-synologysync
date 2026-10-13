@@ -244,8 +244,9 @@ class SynologySyncPlugin(BeetsPlugin):
             for candidate in results:
                 candidate_path = song_path(candidate)
                 matched = candidate_path == syno_path
+                message = "Comparing AudioStation path '{}' with mapped path '{}': {}"
                 self._log.debug(
-                    "Comparing AudioStation path '{}' with mapped path '{}': {}",
+                    ui.colorize("text_success", message) if matched else message,
                     candidate_path,
                     syno_path,
                     "match" if matched else "no match",
@@ -437,7 +438,13 @@ class SynologySyncPlugin(BeetsPlugin):
                     item.store()
                 else:
                     client.set_rating(song["id"], source)
-                self._log.info("Synced rating to {}: {}", opts.dest, item.path)
+                self._log.info(
+                    "Synced rating to {}: {} (rating {} -> {})",
+                    opts.dest,
+                    item.path,
+                    destination,
+                    source,
+                )
 
     def _playlist_settings(self):
         self._plugin("playlist")
