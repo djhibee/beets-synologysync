@@ -169,8 +169,12 @@ are skipped, never overwritten or recreated as normal playlists.
 Imports only request the playlist list and the songs of the selected playlists
 (`Playlist getinfo`); the AudioStation song library is never listed. Exports
 must resolve local files to AudioStation song IDs, which the API cannot look up
-by path, so the song library is listed once, and only if at least one selected
-playlist actually needs to be written.
+by path. While fewer than `SingleAPICallThreshold` (default `100`) distinct
+songs need resolving, each one is looked up with Song search (title, then album,
+then artist) and matched by mapped path, as for ratings; results are reused
+across playlists. Larger exports, or songs without title, album and artist,
+list the song library once, and only if a selected playlist actually needs to
+be written.
 
 ### Playlist identity and filenames
 
