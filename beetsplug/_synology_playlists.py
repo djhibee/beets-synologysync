@@ -29,8 +29,11 @@ def decode_name(encoded):
 class OwnerAliases:
     """Store only owner identities, never remote playlist IDs."""
 
-    def __init__(self, lib):
+    def __init__(self, lib, pretend=False):
         self.lib = lib
+        # In pretend mode, new aliases are only allocated in memory.
+        self.pretend = pretend
+        self.pending = {}  # owner -> alias
         with lib.transaction() as tx:
             tx.mutate(
                 "CREATE TABLE IF NOT EXISTS synologysync_owner_aliases "
@@ -49,24 +52,35 @@ class OwnerAliases:
                 if not re.fullmatch(r"[A-Za-z0-9-]{1,8}", alias):
                     raise ui.UserError(f"Invalid stored playlist owner alias: {alias}")
                 return alias
+            if owner in self.pending:
+                return self.pending[owner]
             stem = re.sub(r"[^A-Za-z0-9-]", "-", owner).strip("-") or "owner"
             candidate = stem[:8]
             number = 0
             while True:
-                tx.mutate(
-                    "INSERT OR IGNORE INTO synologysync_owner_aliases "
-                    "(alias, owner) VALUES (?, ?)",
-                    (candidate, owner),
-                )
-                rows = tx.query(
-                    "SELECT alias FROM synologysync_owner_aliases WHERE owner = ?",
-                    (owner,),
-                )
-                if rows:
-                    alias = rows[0]["alias"]
-                    if not re.fullmatch(r"[A-Za-z0-9-]{1,8}", alias):
-                        raise ui.UserError(f"Invalid stored playlist owner alias: {alias}")
-                    return alias
+                if self.pretend:
+                    taken = candidate in self.pending.values() or tx.query(
+                        "SELECT 1 FROM synologysync_owner_aliases WHERE alias = ?",
+                        (candidate,),
+                    )
+                    if not taken:
+                        self.pending[owner] = candidate
+                        return candidate
+                else:
+                    tx.mutate(
+                        "INSERT OR IGNORE INTO synologysync_owner_aliases "
+                        "(alias, owner) VALUES (?, ?)",
+                        (candidate, owner),
+                    )
+                    rows = tx.query(
+                        "SELECT alias FROM synologysync_owner_aliases WHERE owner = ?",
+                        (owner,),
+                    )
+                    if rows:
+                        alias = rows[0]["alias"]
+                        if not re.fullmatch(r"[A-Za-z0-9-]{1,8}", alias):
+                            raise ui.UserError(f"Invalid stored playlist owner alias: {alias}")
+                        return alias
                 number += 1
                 suffix = str(number)
                 if len(suffix) >= 8:

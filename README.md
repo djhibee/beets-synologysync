@@ -94,6 +94,19 @@ public hostname. Use `ca_file` for a private CA; this setting does not accept
 expired, untrusted, or mismatched certificates. Redirects remain forbidden,
 and authenticated requests are not automatically retried.
 
+## Pretend mode
+
+Both commands accept `--pretend` to preview a synchronization without changing
+anything. AudioStation is still contacted (the password is prompted) and read
+as usual, so mapping errors and missing songs are reported, but no rating is
+stored in beets or sent to AudioStation, no M3U file is written, no remote
+playlist is created or updated, and no new owner alias is saved in the beets
+database. Each change is logged as `Would sync ...` with its old and new value
+(ratings) or the conflict policy and song count (playlists).
+Pretend mode never prompts: a conflict that would ask **update/keep** or
+**replace/skip/merge** is reported as such, and playlists are previewed with
+the default **replace** policy unless `--conflict` or `--force` is given.
+
 ## Ratings
 
 ```sh
@@ -102,6 +115,7 @@ beet syncSynoRatings --dest=syno --force album:Example
 beet syncSynoRatings --url=https://nas.example.org:5001 --synouser=alice --beetuser=bob
 beet syncSynoRatings --rating 8 --dest=beet
 beet syncSynoRatings --rating 6 --dest=syno
+beet syncSynoRatings --pretend --dest=syno artist:Example
 ```
 
 The default destination is `beet`; `--dest=syno` exports to AudioStation.
@@ -156,6 +170,7 @@ beet syncSynoPlaylist --dest=syno --conflict=merge
 beet syncSynoPlaylist --dest=syno --force -p favourites
 beet syncSynoPlaylist --library=shared
 beet syncSynoPlaylist --dest=syno --force -p G_alice_favourites
+beet syncSynoPlaylist --pretend --dest=syno
 ```
 
 This command works in both directions.

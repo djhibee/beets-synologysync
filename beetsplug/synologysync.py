@@ -95,6 +95,10 @@ class SynologySyncPlugin(BeetsPlugin):
             command.parser.add_option(
                 "--force", action="store_true", default=False, help="overwrite conflicts"
             )
+            command.parser.add_option(
+                "--pretend", action="store_true", default=False,
+                help="show what would be synchronized without changing anything",
+            )
             if name == "syncSynoRatings":
                 command.parser.add_option(
                     "--rating", type="int",
@@ -427,6 +431,17 @@ class SynologySyncPlugin(BeetsPlugin):
                         "Rating already in sync for {}: {}", item.path, destination
                     )
                     continue
+                if opts.pretend:
+                    self._log.info(
+                        "Would sync rating to {}: {} (rating {} -> {}){}",
+                        opts.dest,
+                        item.path,
+                        destination,
+                        source,
+                        " [would ask update/keep]"
+                        if destination is not None and not force else "",
+                    )
+                    continue
                 if destination is not None and not force:
                     self._log.info("Rating exists for {}: {}", item.path, destination)
                     if ui.input_options(("update", "keep")) == "k":
@@ -498,6 +513,13 @@ class SynologySyncPlugin(BeetsPlugin):
             return opts.conflict
         if self._force(opts, "playlist"):
             return "replace"
+        if opts.pretend:
+            self._log.info(
+                "Playlist already exists: {} [would ask replace/skip/merge; "
+                "assuming replace]",
+                name,
+            )
+            return "replace"
         self._log.info("Playlist already exists: {}", name)
         return {"r": "replace", "s": "skip", "m": "merge"}[
             ui.input_options(("replace", "skip", "merge"))
@@ -538,7 +560,7 @@ class SynologySyncPlugin(BeetsPlugin):
             self._log.info("No items match the query")
             return
         local = self._local_playlists(directory)
-        aliases = OwnerAliases(lib)
+        aliases = OwnerAliases(lib, pretend=opts.pretend)
         if opts.dest == "beet":
             # The alias namespace spans categories: validate every existing
             # encoded filename before allocating aliases for incoming owners.
@@ -644,6 +666,14 @@ class SynologySyncPlugin(BeetsPlugin):
                 continue
             if policy == "merge" and name in local:
                 entries = _unique(self._read_playlist(path, base) + entries)
+            if opts.pretend:
+                self._log.info(
+                    "Would sync playlist to beets ({}): {} ({} songs)",
+                    policy if name in local else "create",
+                    name,
+                    len(entries),
+                )
+                continue
             self._write_playlist(path, base, entries)
             self._log.info("Synced playlist to beets: {}", name)
 
@@ -717,6 +747,14 @@ class SynologySyncPlugin(BeetsPlugin):
                 ids = _unique(
                     [song["id"] for song in client.playlist_songs(existing["id"])] + ids
                 )
+            if opts.pretend:
+                self._log.info(
+                    "Would sync playlist to AudioStation ({}): {} ({} songs)",
+                    policy if existing else "create",
+                    name,
+                    len(ids),
+                )
+                continue
             client.save_playlist(
                 name, ids, existing["id"] if existing else None, library=library
             )
