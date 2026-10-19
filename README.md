@@ -280,6 +280,41 @@ selection; use merge to retain other songs. Homonyms are supported through their
 encoded identities; unresolved ambiguity is always rejected rather than choosing
 an arbitrary target. Local writes are atomic.
 
+## Media indexing
+
+```sh
+beet synoindex artist:Example
+beet synoindex --pretend album:Example
+beet synoindex --ssh=root@192.168.1.10 added:2026-10-01..
+```
+
+`synoindex` asks the NAS to re-index only the directories containing the items
+matched by a beets query (no query selects the entire library), so that new or
+modified files appear in AudioStation without a full re-index. DSM's WebAPI
+only offers a global re-index, so the command runs DSM's `synoindex -R <dir>`
+tool over SSH (enable SSH in DSM and preferably use key authentication). No
+AudioStation password is prompted.
+
+```yaml
+synologysync:
+  synoindex:
+    ssh: alice@nas.example.org   # default: <synouser>@<hostname of host>
+    ssh_options: [-p, "2222"]    # extra ssh arguments
+    command: sudo -n synoindex   # default: synoindex
+    path_mapping:                # default: synologysync.path_mapping
+      - local: /home/alice/Music
+        syno: /volume1/music
+    batch_size: 50               # directories per ssh invocation
+```
+
+`synoindex` expects DSM filesystem paths (e.g. `/volume1/music/...`); set
+`synoindex.path_mapping` when AudioStation's song paths differ from them.
+Each distinct item directory is requested once; items without a mapping are
+reported and skipped. `synoindex` usually requires root: use a root login, or
+`sudo -n` with a passwordless sudo rule. Paths are shell-quoted for the remote
+shell, and the command stops at the first failure. `--pretend` only logs the
+directories that would be re-indexed.
+
 ## Tests
 
 ```sh

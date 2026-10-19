@@ -426,7 +426,7 @@ class PluginTest(unittest.TestCase):
     def test_playlist_command_name_and_options(self):
         commands = self.plugin.commands()
         self.assertEqual([command.name for command in commands],
-                         ["syncSynoRatings", "syncSynoPlaylist"])
+                         ["syncSynoRatings", "syncSynoPlaylist", "synoindex"])
         command = commands[1]
         self.assertEqual(command.func, self.plugin.sync_playlists)
         opts, args = command.parser.parse_args(
@@ -436,6 +436,72 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(opts.playlist, "favourites")
         self.assertEqual(opts.conflict, "merge")
         self.assertEqual(args, ["title:one"])
+
+    def _index_items(self):
+        album = os.path.join(self.music, "Artist", "Album")
+        for title in ("three", "four"):
+            self.lib.add(Item(path=os.fsencode(os.path.join(album, title + ".mp3")),
+                              title=title, artist="Artist"))
+
+    def test_synoindex_reindexes_unique_mapped_directories_over_ssh(self):
+        self._index_items()
+        self.lib.add(Item(path=b"/elsewhere/x.mp3", title="x", artist="Artist"))
+        opts = self.options(command=2)
+        with patch("beetsplug.synologysync.subprocess.run",
+                   return_value=SimpleNamespace(returncode=0)) as run:
+            self.plugin.synoindex(self.lib, opts, ["artist:Artist"])
+        run.assert_called_once_with(
+            ["ssh", "--", "alice@nas", "synoindex -R /music/Artist/Album"], check=False
+        )
+        self.client_patch.target.AudioStation.assert_not_called()
+        self.password.assert_not_called()
+
+    def test_synoindex_configuration_quoting_and_batches(self):
+        self._index_items()
+        weird = os.path.join(self.music, "It's; rm -rf")
+        self.lib.add(Item(path=os.fsencode(os.path.join(weird, "y.mp3")),
+                          title="y", artist="Artist"))
+        self.plugin.config["synoindex"].set({
+            "ssh": "root@192.168.1.10",
+            "ssh_options": ["-p", "2222"],
+            "command": "sudo -n /usr/syno/bin/synoindex",
+            "path_mapping": [{"local": self.music, "syno": "/volume1/music"}],
+            "batch_size": 1,
+        })
+        opts = self.options(command=2)
+        with patch("beetsplug.synologysync.subprocess.run",
+                   return_value=SimpleNamespace(returncode=0)) as run:
+            self.plugin.synoindex(self.lib, opts, ["artist:Artist"])
+        self.assertEqual(run.call_args_list, [
+            call(["ssh", "-p", "2222", "--", "root@192.168.1.10",
+                  "sudo -n /usr/syno/bin/synoindex -R /volume1/music/Artist/Album"],
+                 check=False),
+            call(["ssh", "-p", "2222", "--", "root@192.168.1.10",
+                  "sudo -n /usr/syno/bin/synoindex -R "
+                  "'/volume1/music/It'\"'\"'s; rm -rf'"], check=False),
+        ])
+
+    def test_synoindex_pretend_and_cli_destination(self):
+        self._index_items()
+        opts = self.options(command=2, arguments=("--pretend", "--ssh=bob@nas"))
+        with patch("beetsplug.synologysync.subprocess.run") as run, \
+                self.assertLogs("beets.synologysync", level="INFO") as logs:
+            self.plugin.synoindex(self.lib, opts, ["artist:Artist"])
+        run.assert_not_called()
+        self.assertIn("Would request reindex of /music/Artist/Album",
+                      "\n".join(logs.output))
+        with self.assertRaises(ui.UserError):
+            self.plugin.synoindex(
+                self.lib, self.options(command=2, arguments=("--ssh=-oProxyCommand=x",)),
+                ["artist:Artist"],
+            )
+
+    def test_synoindex_failure_is_reported(self):
+        opts = self.options(command=2)
+        with patch("beetsplug.synologysync.subprocess.run",
+                   return_value=SimpleNamespace(returncode=1)), \
+                self.assertRaises(ui.UserError):
+            self.plugin.synoindex(self.lib, opts, [])
 
     def test_username_fallback_precedence(self):
         opts = self.options()

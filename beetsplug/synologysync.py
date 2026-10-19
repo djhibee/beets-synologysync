@@ -3,8 +3,11 @@
 import getpass
 import os
 import posixpath
+import shlex
+import subprocess
 import tempfile
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 from beets import config, plugins, ui
 from beets.plugins import BeetsPlugin
@@ -76,6 +79,13 @@ class SynologySyncPlugin(BeetsPlugin):
                 "library": "all",
                 "playlist_library": "personal",
                 "SingleAPICallThreshold": 100,
+                "synoindex": {
+                    "ssh": "",
+                    "ssh_options": [],
+                    "command": "synoindex",
+                    "path_mapping": [],
+                    "batch_size": 50,
+                },
             }
         )
 
@@ -118,6 +128,18 @@ class SynologySyncPlugin(BeetsPlugin):
                 )
             command.func = handler
             commands.append(command)
+        command = ui.Subcommand(
+            "synoindex", help="refresh Synology media indexing of the query's directories"
+        )
+        command.parser.add_option("--url", help="HTTPS AudioStation base URL")
+        command.parser.add_option("--synouser", help="NAS login")
+        command.parser.add_option("--ssh", help="SSH destination ([user@]host)")
+        command.parser.add_option(
+            "--pretend", action="store_true", default=False,
+            help="show the directories that would be reindexed without running anything",
+        )
+        command.func = self.synoindex
+        commands.append(command)
         return commands
 
     def _force(self, opts, kind):
@@ -271,6 +293,111 @@ class SynologySyncPlugin(BeetsPlugin):
                 value,
             )
         return song, candidates
+
+    def _ssh_destination(self, opts):
+        destination = opts.ssh or self.config["synoindex"]["ssh"].get(str)
+        if not destination:
+            url = opts.url or self.config["host"].get(str)
+            try:
+                hostname = urlsplit(url).hostname if url else None
+            except ValueError:
+                hostname = None
+            if not hostname:
+                raise ui.UserError("Set synologysync.synoindex.ssh, --ssh or synologysync.host")
+            if ":" in hostname:
+                hostname = f"[{hostname}]"
+            destination = f"{self._username(opts)}@{hostname}"
+        if (
+            destination.startswith("-")
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127
+                   for char in destination)
+        ):
+            raise ui.UserError("Invalid SSH destination")
+        return destination
+
+    def _synoindex_settings(self):
+        index = self.config["synoindex"]
+        command = index["command"].get()
+        try:
+            command = shlex.split(command) if isinstance(command, str) else [
+                str(part) for part in command
+            ]
+        except (TypeError, ValueError):
+            command = []
+        if not command:
+            raise ui.UserError("synologysync.synoindex.command must not be empty")
+        options = index["ssh_options"].get()
+        if isinstance(options, str):
+            options = shlex.split(options)
+        if not isinstance(options, list):
+            raise ui.UserError("synologysync.synoindex.ssh_options must be a list")
+        try:
+            batch_size = int(index["batch_size"].get())
+        except (TypeError, ValueError):
+            batch_size = 0
+        if batch_size < 1:
+            raise ui.UserError("synologysync.synoindex.batch_size must be a positive integer")
+        mappings = index["path_mapping"].get() or self.config["path_mapping"].get()
+        try:
+            mapping = PathMapping(mappings)
+        except (KeyError, TypeError, ValueError):
+            raise ui.UserError(
+                "path_mapping must contain local/syno path pairs"
+            ) from None
+        return command, [str(option) for option in options], batch_size, mapping
+
+    def synoindex(self, lib, opts, args):
+        command, ssh_options, batch_size, mapping = self._synoindex_settings()
+        items = list(lib.items(ui.decargs(args)))
+        if not items:
+            self._log.info("No items match the query")
+            return
+        directories = []
+        for item in items:
+            local = os.path.dirname(os.fsdecode(item.path))
+            remote = mapping.to_syno(local)
+            if remote is None:
+                self._log.warning(
+                    "No path_mapping for {}; skipping", local
+                )
+                continue
+            if not posixpath.isabs(remote) or any(
+                ord(char) < 32 or ord(char) == 127 for char in remote
+            ):
+                raise ui.UserError(f"Invalid NAS directory: {remote!r}")
+            directories.append(remote)
+        directories = _unique(directories)
+        if not directories:
+            self._log.info("No mapped directories to reindex")
+            return
+        destination = self._ssh_destination(opts)
+        for directory in directories:
+            self._log.info(
+                "{} reindex of {}",
+                "Would request" if opts.pretend else "Requesting",
+                directory,
+            )
+        if opts.pretend:
+            return
+        for start in range(0, len(directories), batch_size):
+            batch = directories[start:start + batch_size]
+            remote = " && ".join(
+                shlex.join(command + ["-R", directory]) for directory in batch
+            )
+            self._log.debug("Running on {}: {}", destination, remote)
+            try:
+                result = subprocess.run(
+                    ["ssh", *ssh_options, "--", destination, remote], check=False
+                )
+            except OSError as exc:
+                raise ui.UserError(f"Unable to run ssh: {exc}") from None
+            if result.returncode != 0:
+                raise ui.UserError(
+                    f"synoindex failed on {destination} (exit status {result.returncode})"
+                )
+        self._log.info(
+            "Requested reindex of {} directories on {}", len(directories), destination
+        )
 
     def _plugin(self, name):
         for plugin in plugins.find_plugins():
