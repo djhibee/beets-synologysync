@@ -630,6 +630,54 @@ class PluginTest(unittest.TestCase):
             self.plugin.sync_playlists(self.lib, self.options(arguments=("--dest=syno",)), [])
         self.client.save_playlist.assert_not_called()
 
+    def test_playlist_import_pretend_writes_nothing(self):
+        with patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_playlists(self.lib, self.options(arguments=("--pretend",)), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+        info.assert_any_call(
+            "Would sync playlist to beets ({}): {} ({} songs)",
+            "create", "P_alice_favourites", 2,
+        )
+        with self.lib.transaction() as tx:
+            rows = tx.query("SELECT * FROM synologysync_owner_aliases")
+        self.assertEqual(rows, [])
+
+    def test_playlist_import_pretend_does_not_prompt_or_overwrite(self):
+        OwnerAliases(self.lib).alias("alice")
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
+        self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.two.path)])
+        with patch("beetsplug.synologysync.ui.input_options") as prompt:
+            self.plugin.sync_playlists(self.lib, self.options(arguments=("--pretend",)), [])
+        prompt.assert_not_called()
+        self.assertEqual(self.plugin._read_playlist(path, self.playlists),
+                         [os.fsdecode(self.two.path)])
+
+    def test_playlist_export_pretend_resolves_but_does_not_save(self):
+        path = os.path.join(self.playlists, "favourites.m3u")
+        self.plugin._write_playlist(path, self.playlists, [os.fsdecode(self.one.path)])
+        with patch("beetsplug.synologysync.ui.input_options") as prompt, \
+                patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--pretend")), []
+            )
+        prompt.assert_not_called()
+        self.client.save_playlist.assert_not_called()
+        info.assert_any_call(
+            "Would sync playlist to AudioStation ({}): {} ({} songs)",
+            "replace", "favourites", 1,
+        )
+
+    def test_pretend_alias_allocation_avoids_existing_aliases(self):
+        OwnerAliases(self.lib).alias("alice")
+        aliases = OwnerAliases(self.lib, pretend=True)
+        self.assertEqual(aliases.alias("alice"), "alice")
+        self.assertEqual(aliases.alias("alice!"), "alice1")
+        self.assertEqual(aliases.alias("alice?"), "alice2")
+        self.assertEqual(aliases.alias("alice!"), "alice1")
+        with self.lib.transaction() as tx:
+            rows = tx.query("SELECT owner FROM synologysync_owner_aliases")
+        self.assertEqual([row["owner"] for row in rows], ["alice"])
+
     def test_no_matches_does_not_connect_or_overwrite(self):
         self.plugin.sync_playlists(self.lib, self.options(), ["title:missing"])
         self.password.assert_not_called()
@@ -1511,6 +1559,39 @@ class PluginTest(unittest.TestCase):
             prompt.assert_not_called()
         self.one.load()
         self.assertEqual(parse(self.one.get("userrating"))["beets-alice"], 8)
+
+    def test_pretend_option_on_both_commands(self):
+        for command in (0, 1):
+            with self.subTest(command=command):
+                self.assertFalse(self.options(command).pretend)
+                self.assertTrue(self.options(command, ("--pretend",)).pretend)
+
+    def test_rating_import_pretend_does_not_store_or_prompt(self):
+        parse = self.prepare_ratings()
+        self.one["userrating"] = {"beets-alice": 0}
+        self.one.store()
+        with patch("beetsplug.synologysync.ui.input_options") as prompt, \
+                patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--pretend",)), ["title:one"]
+            )
+        prompt.assert_not_called()
+        info.assert_any_call(
+            "Would sync rating to {}: {} (rating {} -> {}){}",
+            "beet", self.one.path, 0, 8, " [would ask update/keep]",
+        )
+        self.one.load()
+        self.assertEqual(parse(self.one.get("userrating")), {"beets-alice": 0})
+
+    def test_rating_export_pretend_does_not_write_to_audiostation(self):
+        self.prepare_ratings()
+        self.one["userrating"] = {"beets-alice": 6}
+        self.one.store()
+        self.plugin.sync_ratings(
+            self.lib, self.options(0, ("--dest=syno", "--pretend", "--force")), []
+        )
+        self.client.set_rating.assert_not_called()
+        self.client.close.assert_called_once()
 
     def test_zero_rating_is_imported(self):
         parse = self.prepare_ratings()
