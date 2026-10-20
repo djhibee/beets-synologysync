@@ -486,13 +486,27 @@ class PluginTest(unittest.TestCase):
             self.assertEqual(self.plugin._local_synoindex(), binary)
         run.assert_not_called()
 
-    def test_synoindex_failure_is_reported(self):
-        os.makedirs(self.music, exist_ok=True)
+    def test_synoindex_failure_continues_with_other_directories(self):
+        dirs = [os.path.join(self.music, name) for name in ("a", "b", "c")]
+        for directory in dirs:
+            os.makedirs(directory)
+            self.lib.add(Item(path=os.fsencode(os.path.join(directory, "s.mp3")),
+                              title="s", artist="Batch"))
+        results = [SimpleNamespace(returncode=1), OSError("boom"),
+                   SimpleNamespace(returncode=0)]
         with self._local_synoindex(), \
                 patch("beetsplug.synologysync.subprocess.run",
-                      return_value=SimpleNamespace(returncode=1)), \
-                self.assertRaises(ui.UserError):
-            self.plugin.synoindex(self.lib, self.options(command=2), [])
+                      side_effect=results) as run, \
+                self.assertLogs("beets.synologysync", level="WARNING") as logs, \
+                self.assertRaisesRegex(ui.UserError, "2 of 3 directories"):
+            self.plugin.synoindex(self.lib, self.options(command=2), ["artist:Batch"])
+        self.assertEqual(
+            run.call_args_list,
+            [call(["/usr/syno/bin/synoindex", "-R", d], check=False) for d in dirs],
+        )
+        output = "\n".join(logs.output)
+        self.assertIn("synoindex failed for " + dirs[0], output)
+        self.assertIn("Unable to run synoindex for " + dirs[1], output)
 
     def test_username_fallback_precedence(self):
         opts = self.options()

@@ -312,6 +312,7 @@ class SynologySyncPlugin(BeetsPlugin):
         if not directories:
             self._log.info("No directories to reindex")
             return
+        failed = []
         for directory in directories:
             if opts.pretend:
                 self._log.info("Would reindex {}", directory)
@@ -320,13 +321,27 @@ class SynologySyncPlugin(BeetsPlugin):
             try:
                 result = subprocess.run([binary, "-R", directory], check=False)
             except OSError as exc:
-                raise ui.UserError(f"Unable to run synoindex: {exc}") from None
+                self._log.warning("Unable to run synoindex for {}: {}", directory, exc)
+                failed.append(directory)
+                continue
             if result.returncode != 0:
-                raise ui.UserError(
-                    f"synoindex failed for {directory} (exit status {result.returncode})"
+                self._log.warning(
+                    "synoindex failed for {} (exit status {})",
+                    directory,
+                    result.returncode,
                 )
-        if not opts.pretend:
-            self._log.info("Requested reindex of {} directories", len(directories))
+                failed.append(directory)
+        if opts.pretend:
+            return
+        self._log.info(
+            "Requested reindex of {} of {} directories",
+            len(directories) - len(failed),
+            len(directories),
+        )
+        if failed:
+            raise ui.UserError(
+                f"synoindex failed for {len(failed)} of {len(directories)} directories"
+            )
 
     def _plugin(self, name):
         for plugin in plugins.find_plugins():
