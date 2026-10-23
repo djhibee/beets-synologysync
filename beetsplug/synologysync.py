@@ -340,7 +340,8 @@ class SynologySyncPlugin(BeetsPlugin):
         )
         if failed:
             raise ui.UserError(
-                f"synoindex failed for {len(failed)} of {len(directories)} directories"
+                f"synoindex failed for {len(failed)} of {len(directories)} directories:\n"
+                + "\n".join(f"  {directory}" for directory in failed)
             )
 
     def _plugin(self, name):

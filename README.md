@@ -299,7 +299,8 @@ checks for DSM's `synoindex` tool (on `PATH` or `/usr/syno/bin/synoindex`)
 and fails otherwise. Library paths are passed unchanged, so they must be the
 NAS paths (e.g. `/volume1/music/...`). Missing directories are reported and
 skipped. A `synoindex` failure is logged and the remaining directories are
-still processed; the command then exits with an error summarizing the failures. `synoindex`
+still processed; the command then exits with an error giving the number of failures and listing every failed
+directory. `synoindex`
 usually requires root privileges. `--pretend` only logs the directories that
 would be re-indexed.
 

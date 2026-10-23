@@ -498,8 +498,13 @@ class PluginTest(unittest.TestCase):
                 patch("beetsplug.synologysync.subprocess.run",
                       side_effect=results) as run, \
                 self.assertLogs("beets.synologysync", level="WARNING") as logs, \
-                self.assertRaisesRegex(ui.UserError, "2 of 3 directories"):
+                self.assertRaises(ui.UserError) as error:
             self.plugin.synoindex(self.lib, self.options(command=2), ["artist:Batch"])
+        self.assertEqual(
+            str(error.exception),
+            "synoindex failed for 2 of 3 directories:\n"
+            f"  {dirs[0]}\n  {dirs[1]}",
+        )
         self.assertEqual(
             run.call_args_list,
             [call(["/usr/syno/bin/synoindex", "-R", d], check=False) for d in dirs],
