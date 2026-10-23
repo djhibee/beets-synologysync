@@ -280,6 +280,30 @@ selection; use merge to retain other songs. Homonyms are supported through their
 encoded identities; unresolved ambiguity is always rejected rather than choosing
 an arbitrary target. Local writes are atomic.
 
+## Media indexing
+
+```sh
+beet synoindex artist:Example
+beet synoindex --pretend album:Example
+```
+
+`synoindex` asks DSM to re-index only the directories (typically album
+folders) containing the items matched by a beets query, so new or modified
+files appear in AudioStation without a full re-index. No query selects the
+entire library. For each distinct directory it runs `synoindex -R <directory>`
+locally; no AudioStation password is prompted and no network connection is
+made.
+
+beets must therefore run on the Synology NAS hosting AudioStation: the command
+checks for DSM's `synoindex` tool (on `PATH` or `/usr/syno/bin/synoindex`)
+and fails otherwise. Library paths are passed unchanged, so they must be the
+NAS paths (e.g. `/volume1/music/...`). Missing directories are reported and
+skipped. A `synoindex` failure is logged and the remaining directories are
+still processed; the command then exits with an error giving the number of failures and listing every failed
+directory. `synoindex`
+usually requires root privileges. `--pretend` only logs the directories that
+would be re-indexed.
+
 ## Tests
 
 ```sh

@@ -3,6 +3,8 @@
 import getpass
 import os
 import posixpath
+import shutil
+import subprocess
 import tempfile
 from contextlib import contextmanager
 
@@ -16,6 +18,8 @@ from beetsplug._synology_playlists import (
     playlist_category,
     playlist_identity,
 )
+
+SYNOINDEX = "/usr/syno/bin/synoindex"
 
 
 class PathMapping:
@@ -118,6 +122,15 @@ class SynologySyncPlugin(BeetsPlugin):
                 )
             command.func = handler
             commands.append(command)
+        command = ui.Subcommand(
+            "synoindex", help="refresh Synology media indexing of the query's directories"
+        )
+        command.parser.add_option(
+            "--pretend", action="store_true", default=False,
+            help="show the directories that would be reindexed without running anything",
+        )
+        command.func = self.synoindex
+        commands.append(command)
         return commands
 
     def _force(self, opts, kind):
@@ -271,6 +284,65 @@ class SynologySyncPlugin(BeetsPlugin):
                 value,
             )
         return song, candidates
+
+    def _local_synoindex(self):
+        """Return the synoindex binary when beets runs on the AudioStation NAS."""
+        for candidate in (shutil.which("synoindex"), SYNOINDEX):
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        raise ui.UserError(
+            "synoindex not found: beet synoindex must run on the Synology NAS "
+            "hosting AudioStation"
+        )
+
+    def synoindex(self, lib, opts, args):
+        binary = self._local_synoindex()
+        items = list(lib.items(ui.decargs(args)))
+        if not items:
+            self._log.info("No items match the query")
+            return
+        directories = []
+        for item in items:
+            directory = os.path.dirname(os.path.abspath(os.fsdecode(item.path)))
+            if not os.path.isdir(directory):
+                self._log.warning("Directory not found: {}; skipping", directory)
+                continue
+            directories.append(directory)
+        directories = _unique(directories)
+        if not directories:
+            self._log.info("No directories to reindex")
+            return
+        failed = []
+        for directory in directories:
+            if opts.pretend:
+                self._log.info("Would reindex {}", directory)
+                continue
+            self._log.info("Reindexing {}", directory)
+            try:
+                result = subprocess.run([binary, "-R", directory], check=False)
+            except OSError as exc:
+                self._log.warning("Unable to run synoindex for {}: {}", directory, exc)
+                failed.append(directory)
+                continue
+            if result.returncode != 0:
+                self._log.warning(
+                    "synoindex failed for {} (exit status {})",
+                    directory,
+                    result.returncode,
+                )
+                failed.append(directory)
+        if opts.pretend:
+            return
+        self._log.info(
+            "Requested reindex of {} of {} directories",
+            len(directories) - len(failed),
+            len(directories),
+        )
+        if failed:
+            raise ui.UserError(
+                f"synoindex failed for {len(failed)} of {len(directories)} directories:\n"
+                + "\n".join(f"  {directory}" for directory in failed)
+            )
 
     def _plugin(self, name):
         for plugin in plugins.find_plugins():
