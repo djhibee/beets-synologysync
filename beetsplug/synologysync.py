@@ -80,8 +80,11 @@ class SynologySyncPlugin(BeetsPlugin):
                 "library": "all",
                 "playlist_library": "personal",
                 "SingleAPICallThreshold": 100,
+                "synoindex_on_import": True,
             }
         )
+        self._import_synoindex_warned = False
+        self.register_listener("import_task_files", self.import_task_files)
 
     def commands(self):
         commands = []
@@ -295,6 +298,43 @@ class SynologySyncPlugin(BeetsPlugin):
             "hosting AudioStation"
         )
 
+    def _run_synoindex(self, binary, directory):
+        self._log.info("Reindexing {}", directory)
+        try:
+            result = subprocess.run([binary, "-R", directory], check=False)
+        except OSError as exc:
+            self._log.warning("Unable to run synoindex for {}: {}", directory, exc)
+            return False
+        if result.returncode != 0:
+            self._log.warning(
+                "synoindex failed for {} (exit status {})",
+                directory,
+                result.returncode,
+            )
+            return False
+        return True
+
+    def import_task_files(self, session, task):
+        """Reindex the final directories of an album or singleton after import."""
+        if not self.config["synoindex_on_import"].get(bool):
+            return
+        try:
+            binary = self._local_synoindex()
+        except ui.UserError as exc:
+            if not self._import_synoindex_warned:
+                self._import_synoindex_warned = True
+                self._log.warning("{}; skipping reindex after import", exc)
+            return
+        directories = _unique(
+            os.path.dirname(os.path.abspath(os.fsdecode(item.path)))
+            for item in task.imported_items()
+        )
+        for directory in directories:
+            if os.path.isdir(directory):
+                self._run_synoindex(binary, directory)
+            else:
+                self._log.warning("Directory not found: {}; skipping", directory)
+
     def synoindex(self, lib, opts, args):
         binary = self._local_synoindex()
         items = list(lib.items(ui.decargs(args)))
@@ -317,19 +357,7 @@ class SynologySyncPlugin(BeetsPlugin):
             if opts.pretend:
                 self._log.info("Would reindex {}", directory)
                 continue
-            self._log.info("Reindexing {}", directory)
-            try:
-                result = subprocess.run([binary, "-R", directory], check=False)
-            except OSError as exc:
-                self._log.warning("Unable to run synoindex for {}: {}", directory, exc)
-                failed.append(directory)
-                continue
-            if result.returncode != 0:
-                self._log.warning(
-                    "synoindex failed for {} (exit status {})",
-                    directory,
-                    result.returncode,
-                )
+            if not self._run_synoindex(binary, directory):
                 failed.append(directory)
         if opts.pretend:
             return

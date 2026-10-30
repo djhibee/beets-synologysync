@@ -513,6 +513,60 @@ class PluginTest(unittest.TestCase):
         self.assertIn("synoindex failed for " + dirs[0], output)
         self.assertIn("Unable to run synoindex for " + dirs[1], output)
 
+    def _import_task(self, *paths):
+        items = [Item(path=os.fsencode(path)) for path in paths]
+        return SimpleNamespace(imported_items=lambda: items)
+
+    def test_import_task_files_listener_is_registered(self):
+        listeners = self.plugin.listeners["import_task_files"]
+        self.assertIn("import_task_files",
+                      [getattr(f, "__name__", None) for f in listeners])
+
+    def test_import_reindexes_album_directories_after_files_moved(self):
+        album = os.path.join(self.music, "Artist", "Album")
+        disc2 = os.path.join(album, "Disc 2")
+        os.makedirs(disc2)
+        task = self._import_task(os.path.join(album, "1.mp3"),
+                                 os.path.join(album, "2.mp3"),
+                                 os.path.join(disc2, "1.mp3"))
+        with self._local_synoindex(), \
+                patch("beetsplug.synologysync.subprocess.run",
+                      return_value=SimpleNamespace(returncode=0)) as run:
+            self.plugin.import_task_files(session=None, task=task)
+        self.assertEqual(run.call_args_list, [
+            call(["/usr/syno/bin/synoindex", "-R", album], check=False),
+            call(["/usr/syno/bin/synoindex", "-R", disc2], check=False),
+        ])
+
+    def test_import_reindexes_singleton_directory_and_survives_failure(self):
+        singles = os.path.join(self.music, "Non-Album", "Artist")
+        os.makedirs(singles)
+        task = self._import_task(os.path.join(singles, "song.mp3"))
+        with self._local_synoindex(), \
+                patch("beetsplug.synologysync.subprocess.run",
+                      return_value=SimpleNamespace(returncode=1)) as run, \
+                self.assertLogs("beets.synologysync", level="WARNING"):
+            self.plugin.import_task_files(session=None, task=task)
+        run.assert_called_once_with(
+            ["/usr/syno/bin/synoindex", "-R", singles], check=False
+        )
+
+    def test_import_reindex_disabled_or_off_nas_does_not_fail(self):
+        task = self._import_task(os.path.join(self.music, "a.mp3"))
+        with patch("beetsplug.synologysync.subprocess.run") as run:
+            self.plugin.config["synoindex_on_import"] = False
+            with patch.object(self.plugin, "_local_synoindex") as find:
+                self.plugin.import_task_files(session=None, task=task)
+            find.assert_not_called()
+            self.plugin.config["synoindex_on_import"] = True
+            with patch.object(self.plugin, "_local_synoindex",
+                              side_effect=ui.UserError("synoindex not found")), \
+                    self.assertLogs("beets.synologysync", level="WARNING") as logs:
+                self.plugin.import_task_files(session=None, task=task)
+                self.plugin.import_task_files(session=None, task=task)
+        run.assert_not_called()
+        self.assertEqual(len(logs.output), 1)
+
     def test_username_fallback_precedence(self):
         opts = self.options()
         self.plugin.config["synouser"] = ""
