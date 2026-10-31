@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 
-from beets import config, plugins, ui
+from beets import config, plugins, ui, util
 from beets.plugins import BeetsPlugin
 
 from beetsplug._synology import AudioStation, SynologyError, song_path
@@ -326,7 +326,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 self._log.warning("{}; skipping reindex after import", exc)
             return
         directories = _unique(
-            os.path.dirname(os.path.abspath(os.fsdecode(item.path)))
+            os.fsdecode(util.ancestry(util.normpath(item.path))[-1])
             for item in task.imported_items()
         )
         for directory in directories:
@@ -343,7 +343,7 @@ class SynologySyncPlugin(BeetsPlugin):
             return
         directories = []
         for item in items:
-            directory = os.path.dirname(os.path.abspath(os.fsdecode(item.path)))
+            directory = os.fsdecode(util.ancestry(util.normpath(item.path))[-1])
             if not os.path.isdir(directory):
                 self._log.warning("Directory not found: {}; skipping", directory)
                 continue
