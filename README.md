@@ -37,6 +37,7 @@ synologysync:
   timeout: 30
   # SingleAPICallThreshold: 100
   # ca_file: /home/alice/nas-ca.pem
+  # synoindex_on_import: yes  # reindex imported directories (NAS only)
 
 playlist:
   playlist_dir: /home/alice/Playlists
@@ -303,6 +304,17 @@ still processed; the command then exits with an error giving the number of failu
 directory. `synoindex`
 usually requires root privileges. `--pretend` only logs the directories that
 would be re-indexed.
+
+### Automatic re-indexing on import
+
+When `synoindex_on_import` is enabled (the default), `beet import` runs
+`synoindex -R` once the files have been moved, copied or linked to their final
+destination (beets' `import_task_files` event): for an album, each distinct
+directory containing its tracks (normally the album folder); for a singleton,
+the directory containing the song. Failures are logged and never abort the
+import. When `synoindex` is not available (beets is not running on the NAS),
+a single warning is logged and imports continue without re-indexing; set
+`synoindex_on_import: no` to silence it.
 
 ## Tests
 
