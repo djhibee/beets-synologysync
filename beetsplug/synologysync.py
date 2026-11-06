@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
+from time import perf_counter
 
 from beets import config, plugins, ui, util
 from beets.plugins import BeetsPlugin
@@ -67,6 +68,8 @@ def _playlist_name(name):
 class SynologySyncPlugin(BeetsPlugin):
     def __init__(self):
         super().__init__()
+        started = perf_counter()
+        self._log.debug("Initializing synologysync plugin")
         self.config.add(
             {
                 "host": "",
@@ -86,8 +89,19 @@ class SynologySyncPlugin(BeetsPlugin):
         self._import_synoindex_warned = False
         self.register_listener("import_task_files", self.import_task_files)
         self._import_synoindex_binary()
+        self._log.debug(
+            "Initialized synologysync plugin in {:.3f}s", perf_counter() - started
+        )
+
+    @contextmanager
+    def _debug_stage(self, name):
+        started = perf_counter()
+        self._log.debug("Starting {}", name)
+        yield
+        self._log.debug("Completed {} in {:.3f}s", name, perf_counter() - started)
 
     def commands(self):
+        self._log.debug("Registering synologysync commands")
         commands = []
         for name, handler in (
             ("syncSynoRatings", self.sync_ratings),
@@ -178,24 +192,27 @@ class SynologySyncPlugin(BeetsPlugin):
 
     @contextmanager
     def _connect(self, opts):
-        url = opts.url or self.config["host"].get(str)
-        username = self._username(opts)
-        if not url:
-            raise ui.UserError("Set synologysync.host or --url")
+        with self._debug_stage("AudioStation connection settings"):
+            url = opts.url or self.config["host"].get(str)
+            username = self._username(opts)
+            if not url:
+                raise ui.UserError("Set synologysync.host or --url")
         client = None
-        password = getpass.getpass("AudioStation password: ")
+        with self._debug_stage("AudioStation password prompt (waiting for input)"):
+            password = getpass.getpass("AudioStation password: ")
         self._log.info("Connecting to AudioStation...")
         try:
-            client = AudioStation(
-                url,
-                username,
-                password,
-                ca_file=self.config["ca_file"].as_filename()
-                if self.config["ca_file"].get(str)
-                else None,
-                timeout=self.config["timeout"].get(float),
-                public_url=self.config["public_url"].get(str) or None,
-            )
+            with self._debug_stage("AudioStation client initialization and login"):
+                client = AudioStation(
+                    url,
+                    username,
+                    password,
+                    ca_file=self.config["ca_file"].as_filename()
+                    if self.config["ca_file"].get(str)
+                    else None,
+                    timeout=self.config["timeout"].get(float),
+                    public_url=self.config["public_url"].get(str) or None,
+                )
             self._log.info("Connected to AudioStation")
             yield client
         except (SynologyError, OSError, ValueError) as exc:
@@ -291,9 +308,11 @@ class SynologySyncPlugin(BeetsPlugin):
 
     def _local_synoindex(self):
         """Return the executable synoindex binary or a user-provided wrapper."""
-        for candidate in (shutil.which("synoindex"), SYNOINDEX):
-            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
+        with self._debug_stage("synoindex executable lookup (PATH and NAS fallback)"):
+            for candidate in (shutil.which("synoindex"), SYNOINDEX):
+                if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    self._log.debug("Found synoindex executable: {}", candidate)
+                    return candidate
         raise ui.UserError(
             "synoindex not found: beet synoindex must run on the Synology NAS "
             "hosting AudioStation, or have an executable synoindex wrapper on PATH. "
@@ -320,6 +339,7 @@ class SynologySyncPlugin(BeetsPlugin):
 
     def _import_synoindex_binary(self):
         if not self.config["synoindex_on_import"].get(bool):
+            self._log.debug("Skipping synoindex lookup: synoindex_on_import is disabled")
             return None
         try:
             return self._local_synoindex()
@@ -393,6 +413,10 @@ class SynologySyncPlugin(BeetsPlugin):
         raise ui.UserError(f"Enable the beets {name} plugin")
 
     def sync_ratings(self, lib, opts, args):
+        self._log.debug(
+            "Starting syncSynoRatings (dest={}, pretend={}, rating={})",
+            opts.dest, opts.pretend, opts.rating,
+        )
         rating = opts.rating
         if rating is not None:
             if not 0 <= rating <= 10:
@@ -401,39 +425,46 @@ class SynologySyncPlugin(BeetsPlugin):
                 raise ui.UserError(
                     "--rating must be even for --dest=beet (AudioStation uses whole stars)"
                 )
-        self._plugin("userrating")
-        try:
-            from beetsplug.userrating.ratings import (
-                as_ratings,
-                validate_rating,
-                validate_user,
-            )
-        except ImportError:
-            raise ui.UserError(
-                "Install a beets-userrating version supporting per-user ratings"
-            ) from None
-        username = (
-            opts.beetuser
-            or self.config["beetuser"].get(str)
-            or self._username(opts)
-        )
-        try:
-            user = validate_user("beets-" + username)
-        except ValueError as exc:
-            raise ui.UserError(str(exc)) from None
-        force = self._force(opts, "rating")
-        mapping = self._mapping()
-        threshold = self._single_api_call_threshold()
-        items = list(lib.items(ui.decargs(args)))
-        if rating is not None and opts.dest == "syno":
+        with self._debug_stage("userrating plugin lookup and ratings import"):
+            self._plugin("userrating")
             try:
-                items = [
-                    item for item in items
-                    if validate_rating(as_ratings(item.get("userrating")).get(user))
-                    == rating
-                ]
-            except (TypeError, ValueError) as exc:
-                raise ui.UserError(f"Unable to read song rating: {exc}") from None
+                from beetsplug.userrating.ratings import (
+                    as_ratings,
+                    validate_rating,
+                    validate_user,
+                )
+            except ImportError:
+                raise ui.UserError(
+                    "Install a beets-userrating version supporting per-user ratings"
+                ) from None
+        with self._debug_stage("rating sync settings and path mapping"):
+            username = (
+                opts.beetuser
+                or self.config["beetuser"].get(str)
+                or self._username(opts)
+            )
+            try:
+                user = validate_user("beets-" + username)
+            except ValueError as exc:
+                raise ui.UserError(str(exc)) from None
+            force = self._force(opts, "rating")
+            mapping = self._mapping()
+            threshold = self._single_api_call_threshold()
+        self._log.debug("Beets item query: {}", args or "(entire library)")
+        with self._debug_stage("beets item query and loading matching items"):
+            items = list(lib.items(ui.decargs(args)))
+        self._log.debug("Loaded {} matching beets items", len(items))
+        if rating is not None and opts.dest == "syno":
+            with self._debug_stage("local source rating filtering"):
+                try:
+                    items = [
+                        item for item in items
+                        if validate_rating(as_ratings(item.get("userrating")).get(user))
+                        == rating
+                    ]
+                except (TypeError, ValueError) as exc:
+                    raise ui.UserError(f"Unable to read song rating: {exc}") from None
+            self._log.debug("Selected {} beets items with source rating {}", len(items), rating)
         if not items:
             self._log.info("No items match the query")
             return
