@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from time import perf_counter
 
 from beets import config, plugins, ui, util
+from beets.dbcore.query import MatchQuery, PathQuery
 from beets.plugins import BeetsPlugin
 
 from beetsplug._synology import AudioStation, SynologyError, song_path
@@ -49,6 +50,18 @@ class PathMapping:
         path = os.path.abspath(os.fsdecode(path))
         suffix = os.path.relpath(path, local).replace(os.sep, "/")
         return posixpath.normpath(posixpath.join(remote, suffix))
+
+    def to_local(self, path):
+        path = posixpath.normpath(path)
+        candidates = []
+        for local, remote in self.mappings:
+            if path != remote and not path.startswith(remote.rstrip("/") + "/"):
+                continue
+            suffix = posixpath.relpath(path, remote)
+            candidate = os.path.abspath(os.path.join(local, *suffix.split("/")))
+            if self.to_syno(candidate) == path:
+                candidates.append(candidate)
+        return _unique(candidates)
 
 
 def _unique(entries):
@@ -419,6 +432,8 @@ class SynologySyncPlugin(BeetsPlugin):
         )
         rating = opts.rating
         if rating is not None:
+            if args:
+                raise ui.UserError("--rating cannot be combined with a beets query")
             if not 0 <= rating <= 10:
                 raise ui.UserError("--rating must be between 0 and 10")
             if opts.dest == "beet" and rating % 2:
@@ -451,9 +466,13 @@ class SynologySyncPlugin(BeetsPlugin):
             mapping = self._mapping()
             threshold = self._single_api_call_threshold()
         self._log.debug("Beets item query: {}", args or "(entire library)")
-        with self._debug_stage("beets item query and loading matching items"):
-            items = list(lib.items(ui.decargs(args)))
-        self._log.debug("Loaded {} matching beets items", len(items))
+        remote_filter = (
+            rating // 2 if rating is not None and opts.dest == "beet" else None
+        )
+        if remote_filter is None:
+            with self._debug_stage("beets item query and loading matching items"):
+                items = list(lib.items(ui.decargs(args)))
+            self._log.debug("Loaded {} matching beets items", len(items))
         if rating is not None and opts.dest == "syno":
             with self._debug_stage("local source rating filtering"):
                 try:
@@ -465,16 +484,39 @@ class SynologySyncPlugin(BeetsPlugin):
                 except (TypeError, ValueError) as exc:
                     raise ui.UserError(f"Unable to read song rating: {exc}") from None
             self._log.debug("Selected {} beets items with source rating {}", len(items), rating)
-        if not items:
+        if remote_filter is None and not items:
             self._log.info("No items match the query")
             return
         with self._connect(opts) as client:
-            remote_filter = (
-                rating // 2 if rating is not None and opts.dest == "beet" else None
-            )
-            use_global = not args or len(items) >= threshold
-            if use_global:
+            if remote_filter is not None:
                 songs = self._song_index(client, rating=remote_filter)
+                items = []
+                for syno_path in songs:
+                    matched = False
+                    for local_path in mapping.to_local(syno_path):
+                        path_query = PathQuery("path", os.fsencode(local_path))
+                        lookup = (
+                            MatchQuery("path", path_query.pattern)
+                            if path_query.case_sensitive else path_query
+                        )
+                        for item in lib.items(lookup):
+                            if mapping.to_syno(item.path) == syno_path:
+                                items.append(item)
+                                matched = True
+                    if not matched:
+                        self._log.debug(
+                            "No mapped beets item for AudioStation path '{}'",
+                            syno_path,
+                        )
+                self._log.debug(
+                    "Selected {} matching beets items from {} AudioStation songs",
+                    len(items), len(songs),
+                )
+                if not items:
+                    self._log.info("No beets items match the source rating")
+                    return
+            elif not args or len(items) >= threshold:
+                songs = self._song_index(client)
             else:
                 songs = None
             total = len(items)
