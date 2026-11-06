@@ -65,7 +65,7 @@ class ClientTest(unittest.TestCase):
         self.assertIn(b"_sid=session", pool.request.call_args_list[2].kwargs["body"])
         pool.close.assert_called_once()
 
-    def test_request_logging_formats_params_with_braces(self):
+    def test_request_debug_logging_formats_params_with_braces(self):
         pool = Mock()
         pool.request.side_effect = [
             Mock(status=200, data=json.dumps({"success": True, "data": {
@@ -74,9 +74,10 @@ class ClientTest(unittest.TestCase):
             Mock(status=200, data=b'{"success":true,"data":{"sid":"session"}}'),
         ]
         with patch("beetsplug._synology.urllib3.HTTPSConnectionPool", return_value=pool), \
-                self.assertLogs("beets.synologysync", level="INFO") as logs:
+                self.assertLogs("beets.synologysync", level="DEBUG") as logs:
             AudioStation("https://nas:5001", "user", "secret")
         messages = [record.getMessage() for record in logs.records]
+        self.assertTrue(all(record.levelname == "DEBUG" for record in logs.records))
         self.assertIn("'api': 'SYNO.API.Info'", messages[0])
         self.assertIn("'passwd': '***'", messages[1])
         self.assertNotIn("secret", "\n".join(messages))
@@ -319,9 +320,10 @@ class ClientTest(unittest.TestCase):
             list(client.songs())
             client.close()
 
-        info_calls = log_mock.info.call_args_list
+        debug_calls = log_mock.debug.call_args_list
+        log_mock.info.assert_not_called()
         all_logged_text = " ".join(
-            call.args[0].format(*call.args[1:]) for call in info_calls
+            call.args[0].format(*call.args[1:]) for call in debug_calls
         )
 
         self.assertNotIn("secret-password", all_logged_text)

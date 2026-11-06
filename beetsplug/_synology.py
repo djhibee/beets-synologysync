@@ -173,14 +173,14 @@ class AudioStation:
         method = params.get("method", "") if isinstance(params, dict) else ""
         concealed = _conceal_sensitive(params)
         if method:
-            self.log.info(
+            self.log.debug(
                 "Calling AudioStation API: {} ({}) with params: {}",
                 api,
                 method,
                 concealed,
             )
         else:
-            self.log.info(
+            self.log.debug(
                 "Calling AudioStation API: {} with params: {}", api, concealed
             )
         try:
