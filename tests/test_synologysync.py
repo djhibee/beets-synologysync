@@ -13,6 +13,7 @@ import confuse
 
 from beets import config, ui
 from beets.dbcore import types
+from beets.dbcore.db import Results
 from beets.library import Item, Library
 from beets.plugins import BeetsPlugin
 from beetsplug._synology import AudioStation, SynologyError, _conceal_sensitive, _is_sensitive_key
@@ -1844,9 +1845,53 @@ class PluginTest(unittest.TestCase):
         opts = self.options(
             0, ("--rating=6", "--dest=syno", "--beetuser=bob", "--force")
         )
-        self.plugin.sync_ratings(self.lib, opts, [])
+        with patch.object(self.lib, "items", wraps=self.lib.items) as items, \
+                patch.object(
+                    Results, "_make_model", autospec=True,
+                    side_effect=Results._make_model,
+                ) as make_model:
+            self.plugin.sync_ratings(self.lib, opts, [])
+        items.assert_called_once()
+        make_model.assert_called_once()
+        query = items.call_args.args[0]
+        self.assertEqual(query.pattern, [self.one.id])
+        self.assertTrue(query.fast)
+        self.assertEqual([item.id for item in self.lib.items(query)], [self.one.id])
         self.client.songs.assert_called_once_with()
         self.client.set_rating.assert_called_once_with("1", 3)
+
+    def test_filtered_rating_export_empty_selection_does_not_load_items_or_connect(self):
+        self.prepare_ratings()
+        self.one["userrating"] = {"beets-alice": 2, "beets-bob": 6}
+        self.one.store()
+        with patch.object(self.lib, "items", wraps=self.lib.items) as items:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--rating=6", "--dest=syno")), []
+            )
+        items.assert_not_called()
+        self.password.assert_not_called()
+        self.client_patch.target.AudioStation.assert_not_called()
+
+    def test_filtered_rating_export_batches_matching_ids(self):
+        self.prepare_ratings()
+        for index in range(905):
+            self.lib.add(Item(
+                path=os.fsencode(os.path.join(self.music, f"rated-{index}.mp3")),
+                userrating={"beets-alice": 6},
+            ))
+        self.client.songs.return_value = []
+        with patch.object(self.lib, "items", wraps=self.lib.items) as items, \
+                patch.object(self.plugin._log, "warning"):
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--rating=6", "--dest=syno")), []
+            )
+        self.assertEqual(items.call_count, 2)
+        queries = [c.args[0] for c in items.call_args_list]
+        self.assertEqual([len(query.pattern) for query in queries], [900, 5])
+        self.assertTrue(all(query.fast for query in queries))
+        loaded = [item for query in queries for item in self.lib.items(query)]
+        self.assertEqual(len(loaded), 905)
+        self.assertTrue(all(item.get("userrating")["beets-alice"] == 6 for item in loaded))
 
     def test_rating_export_odd_zero_and_ten(self):
         self.prepare_ratings()
