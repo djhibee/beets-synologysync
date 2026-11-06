@@ -169,8 +169,10 @@ AudioStation songs and looks up their mapped local paths in beets, without
 loading or iterating over the entire beets library. Import accepts even values
 only (0, 2, 4, 6, 8, 10),
 because AudioStation has no half-star ratings. With `--dest=syno`, only beets
-items whose selected `beets-<user>` rating equals `N` are exported; odd values
-are rounded up as usual. Zero is a valid filter in either direction.
+items whose selected `beets-<user>` rating equals `N` are loaded and exported.
+Selection reads only the stored rating attributes before loading matching
+items, rather than loading the entire beets library and filtering afterward.
+Odd values are rounded up as usual. Zero is a valid filter in either direction.
 `--rating` cannot be combined with a positional beets query; the command rejects
 this combination in either direction. Without `--rating`, beets queries remain
 supported. Existing conflict

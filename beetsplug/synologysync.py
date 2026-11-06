@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from time import perf_counter
 
 from beets import config, plugins, ui, util
-from beets.dbcore.query import MatchQuery, PathQuery
+from beets.dbcore.query import InQuery, MatchQuery, PathQuery
 from beets.plugins import BeetsPlugin
 
 from beetsplug._synology import AudioStation, SynologyError, song_path
@@ -465,25 +465,38 @@ class SynologySyncPlugin(BeetsPlugin):
             force = self._force(opts, "rating")
             mapping = self._mapping()
             threshold = self._single_api_call_threshold()
-        self._log.debug("Beets item query: {}", args or "(entire library)")
         remote_filter = (
             rating // 2 if rating is not None and opts.dest == "beet" else None
         )
-        if remote_filter is None:
-            with self._debug_stage("beets item query and loading matching items"):
-                items = list(lib.items(ui.decargs(args)))
-            self._log.debug("Loaded {} matching beets items", len(items))
         if rating is not None and opts.dest == "syno":
+            self._log.debug("Beets item query: userrating:{}:{}", user, rating)
             with self._debug_stage("local source rating filtering"):
                 try:
-                    items = [
-                        item for item in items
-                        if validate_rating(as_ratings(item.get("userrating")).get(user))
+                    # Read only the flexible ratings, not every Item and its metadata.
+                    with lib.transaction() as tx:
+                        rows = tx.query(
+                            "SELECT entity_id, value FROM item_attributes WHERE key = ?",
+                            ("userrating",),
+                        )
+                    item_ids = [
+                        row["entity_id"] for row in rows
+                        if validate_rating(as_ratings(row["value"]).get(user))
                         == rating
                     ]
                 except (TypeError, ValueError) as exc:
                     raise ui.UserError(f"Unable to read song rating: {exc}") from None
+            with self._debug_stage("beets item query and loading matching items"):
+                items = []
+                # Stay below SQLite's parameter limit, including on older NAS builds.
+                for offset in range(0, len(item_ids), 900):
+                    items.extend(lib.items(InQuery("id", item_ids[offset:offset + 900])))
+            self._log.debug("Loaded {} matching beets items", len(items))
             self._log.debug("Selected {} beets items with source rating {}", len(items), rating)
+        elif remote_filter is None:
+            self._log.debug("Beets item query: {}", args or "(entire library)")
+            with self._debug_stage("beets item query and loading matching items"):
+                items = list(lib.items(ui.decargs(args)))
+            self._log.debug("Loaded {} matching beets items", len(items))
         if remote_filter is None and not items:
             self._log.info("No items match the query")
             return
