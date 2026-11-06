@@ -135,6 +135,16 @@ beet syncSynoRatings --rating 6 --dest=syno
 beet syncSynoRatings --pretend --dest=syno artist:Example
 ```
 
+For startup diagnostics, run `beet -vvv syncSynoRatings --pretend`. Debug logs
+mark the start and elapsed time of plugin initialization, the local `synoindex`
+lookup, userrating setup, configuration, the beets query and item loading, and
+local rating filtering (when requested). These steps run before the password
+prompt; a large library can take time to load even in pretend mode. Separate
+timings cover waiting for password input and AudioStation client initialization
+and login. Passwords and session tokens are not included. If the delay precedes
+the first synologysync message, it occurs before this plugin's initialization
+logging (for example, in beets startup or plugin imports).
+
 The default destination is `beet`; `--dest=syno` exports to AudioStation.
 Normal beets item queries are accepted; no query selects the entire library.
 The ratings mapping uses the key `beets-<user>`, where `<user>` comes from

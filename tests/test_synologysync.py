@@ -489,6 +489,35 @@ class PluginTest(unittest.TestCase):
         find.assert_not_called()
         warning.assert_not_called()
 
+    def test_startup_debug_logs_time_synoindex_lookup(self):
+        config["synologysync"]["synoindex_on_import"] = True
+        with patch("beetsplug.synologysync.shutil.which",
+                   return_value="/usr/syno/bin/synoindex"), \
+                patch("beetsplug.synologysync.os.path.isfile", return_value=True), \
+                patch("beetsplug.synologysync.os.access", return_value=True), \
+                self.assertLogs("beets", level="DEBUG") as logs:
+            SynologySyncPlugin()
+        messages = [record.getMessage() for record in logs.records]
+        self.assertEqual(messages[0], "Initializing synologysync plugin")
+        self.assertIn(
+            "Starting synoindex executable lookup (PATH and NAS fallback)", messages
+        )
+        self.assertTrue(any(message.startswith(
+            "Completed synoindex executable lookup (PATH and NAS fallback) in "
+        ) for message in messages))
+        self.assertTrue(messages[-1].startswith("Initialized synologysync plugin in "))
+        self.assertTrue(all(record.levelname == "DEBUG" for record in logs.records))
+
+    def test_debug_stage_reports_elapsed_time(self):
+        with patch("beetsplug.synologysync.perf_counter", side_effect=[10, 12.5]), \
+                self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            with self.plugin._debug_stage("example"):
+                pass
+        self.assertEqual(
+            [record.getMessage() for record in logs.records],
+            ["Starting example", "Completed example in 2.500s"],
+        )
+
     def test_synoindex_runs_locally_once_per_album_directory(self):
         album = self._index_items()
         opts = self.options(command=2)
@@ -1597,6 +1626,63 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
         self.assertEqual(parse(self.two.get("userrating")), {})
         self.client.close.assert_called_once()
+
+    def test_rating_debug_stages_precede_password_prompt(self):
+        self.prepare_ratings()
+        opts = self.options(0, ("--pretend",))
+        with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            def password_prompt(prompt):
+                messages = [record.getMessage() for record in logs.records]
+                for stage in (
+                    "userrating plugin lookup and ratings import",
+                    "rating sync settings and path mapping",
+                    "beets item query and loading matching items",
+                    "AudioStation connection settings",
+                ):
+                    self.assertIn("Starting " + stage, messages)
+                    self.assertTrue(any(
+                        message.startswith("Completed " + stage + " in ")
+                        for message in messages
+                    ))
+                self.assertIn("Loaded 1 matching beets items", messages)
+                self.assertEqual(
+                    messages[-1],
+                    "Starting AudioStation password prompt (waiting for input)",
+                )
+                self.client_patch.target.AudioStation.assert_not_called()
+                return "secret"
+
+            self.password.side_effect = password_prompt
+            self.plugin.sync_ratings(self.lib, opts, ["title:one"])
+        messages = [record.getMessage() for record in logs.records]
+        self.assertTrue(any(message.startswith(
+            "Completed AudioStation password prompt (waiting for input) in "
+        ) for message in messages))
+        self.assertTrue(any(message.startswith(
+            "Completed AudioStation client initialization and login in "
+        ) for message in messages))
+        self.assertNotIn("secret", "\n".join(messages))
+        self.client.set_rating.assert_not_called()
+        self.one.load()
+        self.assertIsNone(self.one.get("userrating"))
+
+    def test_rating_export_debug_logs_local_filter_before_prompt(self):
+        self.prepare_ratings()
+        self.one["userrating"] = {"beets-alice": 8}
+        self.one.store()
+        with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            self.plugin.sync_ratings(
+                self.lib,
+                self.options(0, ("--pretend", "--dest=syno", "--rating=8")),
+                [],
+            )
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("Starting local source rating filtering", messages)
+        selected = messages.index("Selected 1 beets items with source rating 8")
+        prompt = messages.index(
+            "Starting AudioStation password prompt (waiting for input)"
+        )
+        self.assertLess(selected, prompt)
 
     def test_rating_sync_log_includes_old_and_new_values(self):
         self.prepare_ratings()
