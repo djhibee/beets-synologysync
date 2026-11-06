@@ -1644,7 +1644,7 @@ class PluginTest(unittest.TestCase):
         self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
         self.one.load()
         self.two.load()
-        self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
+        self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "alice": 8})
         self.assertEqual(parse(self.two.get("userrating")), {})
         self.client.close.assert_called_once()
 
@@ -1689,7 +1689,7 @@ class PluginTest(unittest.TestCase):
 
     def test_rating_export_debug_logs_local_filter_before_prompt(self):
         self.prepare_ratings()
-        self.one["userrating"] = {"beets-alice": 8}
+        self.one["userrating"] = {"alice": 8}
         self.one.store()
         with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
             self.plugin.sync_ratings(
@@ -1733,12 +1733,12 @@ class PluginTest(unittest.TestCase):
         config["userrating"].set({"default_user": "fallback"})
         self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
         self.one.load()
-        self.assertEqual(parse(self.one.get("userrating")), {"beets-fallback": 8})
+        self.assertEqual(parse(self.one.get("userrating")), {"fallback": 8})
         self.assertEqual(self.client_patch.target.AudioStation.call_args.args[1], "fallback")
 
     def test_rating_import_filters_source_not_destination(self):
         parse = self.prepare_ratings()
-        self.one["userrating"] = {"other": 3, "beets-alice": 2}
+        self.one["userrating"] = {"other": 3, "alice": 2}
         self.one.store()
         with patch("beetsplug.synologysync.ui.input_options", return_value="u") as prompt:
             self.plugin.sync_ratings(
@@ -1748,7 +1748,7 @@ class PluginTest(unittest.TestCase):
         self.client.songs.assert_called_once_with(rating=4)
         self.one.load()
         self.two.load()
-        self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
+        self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "alice": 8})
         self.assertEqual(parse(self.two.get("userrating")), {})
 
     def test_rating_with_query_rejected_before_loading_or_connection(self):
@@ -1772,7 +1772,7 @@ class PluginTest(unittest.TestCase):
 
     def test_filtered_rating_import_pretend_does_not_store_or_prompt(self):
         self.prepare_ratings()
-        self.one["userrating"] = {"beets-alice": 2}
+        self.one["userrating"] = {"alice": 2}
         self.one.store()
         self.client.songs.return_value = [self.client.songs.return_value[0]]
         with patch.object(Item, "store") as store, \
@@ -1802,7 +1802,7 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(len(processed), 1)
         self.assertEqual(processed[0].args[1:], (1, 1, self.one.path))
         self.one.load()
-        self.assertEqual(parse(self.one.get("userrating")), {"beets-alice": 8})
+        self.assertEqual(parse(self.one.get("userrating")), {"alice": 8})
 
     def test_filtered_rating_import_empty_remote_does_not_load_beets(self):
         self.prepare_ratings()
@@ -1822,7 +1822,7 @@ class PluginTest(unittest.TestCase):
         warning.assert_not_called()
         self.client.songs.assert_called_once_with(rating=0)
         self.two.load()
-        self.assertEqual(parse(self.two.get("userrating")), {"beets-alice": 0})
+        self.assertEqual(parse(self.two.get("userrating")), {"alice": 0})
 
     def test_invalid_rating_rejected_before_connection(self):
         for rating in ("-1", "11", "3"):
@@ -1838,8 +1838,8 @@ class PluginTest(unittest.TestCase):
 
     def test_rating_export_filters_selected_user(self):
         self.prepare_ratings()
-        self.one["userrating"] = {"beets-bob": 6, "beets-alice": 2}
-        self.two["userrating"] = {"beets-bob": 8, "beets-alice": 6}
+        self.one["userrating"] = {"bob": 6, "alice": 2}
+        self.two["userrating"] = {"bob": 8, "alice": 6}
         self.one.store()
         self.two.store()
         opts = self.options(
@@ -1862,7 +1862,7 @@ class PluginTest(unittest.TestCase):
 
     def test_filtered_rating_export_empty_selection_does_not_load_items_or_connect(self):
         self.prepare_ratings()
-        self.one["userrating"] = {"beets-alice": 2, "beets-bob": 6}
+        self.one["userrating"] = {"alice": 2, "bob": 6}
         self.one.store()
         with patch.object(self.lib, "items", wraps=self.lib.items) as items:
             self.plugin.sync_ratings(
@@ -1872,12 +1872,41 @@ class PluginTest(unittest.TestCase):
         self.password.assert_not_called()
         self.client_patch.target.AudioStation.assert_not_called()
 
+    def test_rating_export_uses_unprefixed_database_user_for_both_items(self):
+        self.prepare_ratings()
+        for item in (self.one, self.two):
+            item["userrating"] = {"djhibee": 6, "beets-djhibee": 2}
+            item.store()
+        opts = self.options(
+            0, ("--rating=6", "--synouser=djhibee", "--beetuser=djhibee",
+                "--dest=syno", "--force")
+        )
+        with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            self.plugin.sync_ratings(self.lib, opts, [])
+        messages = [record.getMessage() for record in logs.records]
+        self.assertIn("Beets item query: userrating:djhibee:6", messages)
+        self.assertIn("Selected 2 beets items with source rating 6", messages)
+        self.assertEqual(self.client.set_rating.call_args_list,
+                         [call("1", 3), call("2", 3)])
+
+    def test_rating_import_uses_configured_database_user_without_changing_other_keys(self):
+        parse = self.prepare_ratings()
+        self.plugin.config["beetuser"] = "djhibee"
+        self.one["userrating"] = {"djhibee": 6, "beets-djhibee": 2}
+        self.one.store()
+        self.plugin.sync_ratings(
+            self.lib, self.options(0, ("--force",)), ["title:one"]
+        )
+        self.one.load()
+        self.assertEqual(parse(self.one.get("userrating")),
+                         {"djhibee": 8, "beets-djhibee": 2})
+
     def test_filtered_rating_export_batches_matching_ids(self):
         self.prepare_ratings()
         for index in range(905):
             self.lib.add(Item(
                 path=os.fsencode(os.path.join(self.music, f"rated-{index}.mp3")),
-                userrating={"beets-alice": 6},
+                userrating={"alice": 6},
             ))
         self.client.songs.return_value = []
         with patch.object(self.lib, "items", wraps=self.lib.items) as items, \
@@ -1891,14 +1920,14 @@ class PluginTest(unittest.TestCase):
         self.assertTrue(all(query.fast for query in queries))
         loaded = [item for query in queries for item in self.lib.items(query)]
         self.assertEqual(len(loaded), 905)
-        self.assertTrue(all(item.get("userrating")["beets-alice"] == 6 for item in loaded))
+        self.assertTrue(all(item.get("userrating")["alice"] == 6 for item in loaded))
 
     def test_rating_export_odd_zero_and_ten(self):
         self.prepare_ratings()
         for rating, stars in ((7, 4), (0, 0), (10, 5)):
             with self.subTest(rating=rating):
                 self.client.set_rating.reset_mock()
-                self.one["userrating"] = {"beets-alice": rating}
+                self.one["userrating"] = {"alice": rating}
                 self.one.store()
                 self.client.songs.return_value[0]["additional"]["song_rating"]["rating"] = 2
                 self.plugin.sync_ratings(
@@ -1910,7 +1939,7 @@ class PluginTest(unittest.TestCase):
 
     def test_rating_export_uses_selected_user_and_rounds_half_stars_up(self):
         self.prepare_ratings()
-        self.one["userrating"] = {"beets-bob": 7, "other": 10}
+        self.one["userrating"] = {"bob": 7, "other": 10}
         self.one.store()
         self.client.songs.return_value[0]["additional"]["song_rating"]["rating"] = 2
         self.plugin.sync_ratings(
@@ -1920,18 +1949,18 @@ class PluginTest(unittest.TestCase):
 
     def test_existing_rating_keep_and_force(self):
         parse = self.prepare_ratings()
-        self.one["userrating"] = {"beets-alice": 0}
+        self.one["userrating"] = {"alice": 0}
         self.one.store()
         with patch("beetsplug.synologysync.ui.input_options", return_value="k") as prompt:
             self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
             prompt.assert_called_once()
         self.one.load()
-        self.assertEqual(parse(self.one.get("userrating"))["beets-alice"], 0)
+        self.assertEqual(parse(self.one.get("userrating"))["alice"], 0)
         with patch("beetsplug.synologysync.ui.input_options") as prompt:
             self.plugin.sync_ratings(self.lib, self.options(0, ("--force",)), ["title:one"])
             prompt.assert_not_called()
         self.one.load()
-        self.assertEqual(parse(self.one.get("userrating"))["beets-alice"], 8)
+        self.assertEqual(parse(self.one.get("userrating"))["alice"], 8)
 
     def test_pretend_option_on_both_commands(self):
         for command in (0, 1):
@@ -1941,7 +1970,7 @@ class PluginTest(unittest.TestCase):
 
     def test_rating_import_pretend_does_not_store_or_prompt(self):
         parse = self.prepare_ratings()
-        self.one["userrating"] = {"beets-alice": 0}
+        self.one["userrating"] = {"alice": 0}
         self.one.store()
         with patch("beetsplug.synologysync.ui.input_options") as prompt, \
                 patch.object(self.plugin._log, "info") as info:
@@ -1954,11 +1983,11 @@ class PluginTest(unittest.TestCase):
             "beet", self.one.path, 0, 8, " [would ask update/keep]",
         )
         self.one.load()
-        self.assertEqual(parse(self.one.get("userrating")), {"beets-alice": 0})
+        self.assertEqual(parse(self.one.get("userrating")), {"alice": 0})
 
     def test_rating_export_pretend_does_not_write_to_audiostation(self):
         self.prepare_ratings()
-        self.one["userrating"] = {"beets-alice": 6}
+        self.one["userrating"] = {"alice": 6}
         self.one.store()
         self.plugin.sync_ratings(
             self.lib, self.options(0, ("--dest=syno", "--pretend", "--force")), []
@@ -1970,7 +1999,7 @@ class PluginTest(unittest.TestCase):
         parse = self.prepare_ratings()
         self.plugin.sync_ratings(self.lib, self.options(0, ("--force",)), ["title:two"])
         self.two.load()
-        self.assertEqual(parse(self.two.get("userrating")), {"beets-alice": 0})
+        self.assertEqual(parse(self.two.get("userrating")), {"alice": 0})
 
     def test_logout_when_sync_fails(self):
         self.prepare_ratings()

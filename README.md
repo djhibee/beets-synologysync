@@ -147,10 +147,11 @@ logging (for example, in beets startup or plugin imports).
 
 The default destination is `beet`; `--dest=syno` exports to AudioStation.
 Normal beets item queries are accepted; no query selects the entire library.
-The ratings mapping uses the key `beets-<user>`, where `<user>` comes from
+The ratings mapping uses the key `<user>`, where `<user>` comes from
 `--beetuser`, `beetuser` configuration, or the effective Synology username, in
 that order. Other users' ratings are left unchanged. This key is the userrating
-database key; userrating independently controls how it names file tags. Ratings
+database key, without the `beets-` prefix used in file tags; userrating
+independently controls how it names file tags. Ratings
 are stored in the beets database; use beets' normal tag-writing workflow if
 you also want file tags updated.
 
@@ -169,7 +170,7 @@ AudioStation songs and looks up their mapped local paths in beets, without
 loading or iterating over the entire beets library. Import accepts even values
 only (0, 2, 4, 6, 8, 10),
 because AudioStation has no half-star ratings. With `--dest=syno`, only beets
-items whose selected `beets-<user>` rating equals `N` are loaded and exported.
+items whose selected `<user>` rating equals `N` are loaded and exported.
 Selection reads only the stored rating attributes before loading matching
 items, rather than loading the entire beets library and filtering afterward.
 Odd values are rounded up as usual. Zero is a valid filter in either direction.

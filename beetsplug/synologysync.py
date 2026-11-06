@@ -123,7 +123,7 @@ class SynologySyncPlugin(BeetsPlugin):
             command = ui.Subcommand(name, help="synchronize with Synology AudioStation")
             command.parser.add_option("--url", help="HTTPS AudioStation base URL")
             command.parser.add_option("--synouser", help="AudioStation login")
-            command.parser.add_option("--beetuser", help="userrating username suffix")
+            command.parser.add_option("--beetuser", help="userrating username")
             command.parser.add_option(
                 "--dest", type="choice", choices=("beet", "syno"), default="beet"
             )
@@ -459,7 +459,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 or self._username(opts)
             )
             try:
-                user = validate_user("beets-" + username)
+                user = validate_user(username)
             except ValueError as exc:
                 raise ui.UserError(str(exc)) from None
             force = self._force(opts, "rating")
