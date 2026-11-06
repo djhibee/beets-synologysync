@@ -375,7 +375,9 @@ class PluginTest(unittest.TestCase):
         config["playlist"]["relative_to"] = "playlist"
         config["playlist"]["forward_slash"] = False
         self.playlist_plugin = PlaylistPlugin()
-        self.plugin = SynologySyncPlugin()
+        with patch.object(SynologySyncPlugin, "_local_synoindex",
+                          return_value="/usr/syno/bin/synoindex"):
+            self.plugin = SynologySyncPlugin()
         self.plugin.config.set({
             "host": "https://nas:5001",
             "synouser": "alice",
@@ -450,6 +452,41 @@ class PluginTest(unittest.TestCase):
     def _local_synoindex(self, path="/usr/syno/bin/synoindex"):
         return patch.object(self.plugin, "_local_synoindex", return_value=path)
 
+    def test_startup_warns_once_when_synoindex_is_missing(self):
+        config["synologysync"]["synoindex_on_import"] = True
+        with patch("beetsplug.synologysync.shutil.which", return_value=None), \
+                patch("beetsplug.synologysync.os.path.isfile", return_value=False), \
+                patch("beetsplug.synologysync.subprocess.run") as run, \
+                self.assertLogs("beets.synologysync", level="WARNING") as logs:
+            plugin = SynologySyncPlugin()
+            task = self._import_task(os.path.join(self.music, "a.mp3"))
+            plugin.import_task_files(session=None, task=task)
+            plugin.import_task_files(session=None, task=task)
+        run.assert_not_called()
+        self.assertEqual(len(logs.output), 1)
+        for text in ("synoindex not found", "Docker", "simple-synoindex-server",
+                     "API", "no built-in API client", "synoindex_on_import: no"):
+            self.assertIn(text, logs.output[0])
+
+    def test_startup_does_not_warn_when_synoindex_is_available(self):
+        config["synologysync"]["synoindex_on_import"] = True
+        with patch.object(SynologySyncPlugin, "_local_synoindex",
+                          return_value="/usr/syno/bin/synoindex") as find, \
+                patch("beetsplug.synologysync.subprocess.run") as run, \
+                patch.object(self.plugin._log, "warning") as warning:
+            SynologySyncPlugin()
+        find.assert_called_once_with()
+        warning.assert_not_called()
+        run.assert_not_called()
+
+    def test_startup_skips_check_when_automatic_reindexing_is_disabled(self):
+        config["synologysync"]["synoindex_on_import"] = False
+        with patch.object(SynologySyncPlugin, "_local_synoindex") as find, \
+                patch.object(self.plugin._log, "warning") as warning:
+            SynologySyncPlugin()
+        find.assert_not_called()
+        warning.assert_not_called()
+
     def test_synoindex_runs_locally_once_per_album_directory(self):
         album = self._index_items()
         opts = self.options(command=2)
@@ -482,6 +519,9 @@ class PluginTest(unittest.TestCase):
                 self.plugin.synoindex(self.lib, self.options(command=2), [])
             with open(binary, "w") as handle:
                 handle.write("#!/bin/sh\n")
+            os.chmod(binary, 0o644)
+            with self.assertRaisesRegex(ui.UserError, "synoindex not found"):
+                self.plugin._local_synoindex()
             os.chmod(binary, 0o755)
             self.assertEqual(self.plugin._local_synoindex(), binary)
         run.assert_not_called()

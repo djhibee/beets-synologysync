@@ -18,6 +18,22 @@ Enable `synologysync`, and enable
 playlists. The userrating installation must support per-user ratings
 (`beetsplug.userrating.ratings`); older single-rating releases are not supported.
 
+Media indexing additionally requires DSM's executable `synoindex`, found on
+`PATH` or at `/usr/syno/bin/synoindex`. With automatic re-indexing enabled
+(the default), the plugin checks this dependency when Beets loads it and logs
+a non-blocking warning if it is missing or not executable. Ratings and playlist
+synchronization remain available. This is a runtime check, not a `pip` install
+hook; set `synologysync.synoindex_on_import: no` to disable automatic indexing
+and its dependency warning.
+
+For Beets running in Docker or outside the NAS, consider
+`simple-synoindex-server` on the NAS to wrap `synoindex` through an API.
+This plugin has no built-in client for that API: provide a separate executable
+wrapper named `synoindex` on Beets' `PATH` that accepts `-R <directory>`,
+calls the server, and returns a nonzero exit status on failure. The wrapper must
+translate container paths to NAS paths if they differ; `path_mapping` is not
+applied to indexing. Installing the server alone does not enable remote indexing.
+
 ## Configuration
 
 ```yaml
@@ -293,11 +309,13 @@ folders) containing the items matched by a beets query, so new or modified
 files appear in AudioStation without a full re-index. No query selects the
 entire library. For each distinct directory it runs `synoindex -R <directory>`
 locally; no AudioStation password is prompted and no network connection is
-made.
+made by the plugin itself (an API wrapper makes its own network requests).
 
-beets must therefore run on the Synology NAS hosting AudioStation: the command
-checks for DSM's `synoindex` tool (on `PATH` or `/usr/syno/bin/synoindex`)
-and fails otherwise. Library paths are passed unchanged, so they must be the
+By default, beets must therefore run on the Synology NAS hosting AudioStation.
+Alternatively, supply an API wrapper as described under Installation.
+The command checks for an executable `synoindex` (on `PATH` or at
+`/usr/syno/bin/synoindex`) and fails otherwise.
+Library paths are passed unchanged, so they must be the
 NAS paths (e.g. `/volume1/music/...`). Missing directories are reported and
 skipped. A `synoindex` failure is logged and the remaining directories are
 still processed; the command then exits with an error giving the number of failures and listing every failed
@@ -312,8 +330,9 @@ When `synoindex_on_import` is enabled (the default), `beet import` runs
 destination (beets' `import_task_files` event): for an album, each distinct
 directory containing its tracks (normally the album folder); for a singleton,
 the directory containing the song. Failures are logged and never abort the
-import. When `synoindex` is not available (beets is not running on the NAS),
-a single warning is logged and imports continue without re-indexing; set
+import. When `synoindex` is not available, a single warning is logged at plugin
+startup (or at import time if it becomes unavailable later), and imports continue
+without re-indexing; set
 `synoindex_on_import: no` to silence it.
 
 ## Tests

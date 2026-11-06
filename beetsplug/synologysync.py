@@ -85,6 +85,7 @@ class SynologySyncPlugin(BeetsPlugin):
         )
         self._import_synoindex_warned = False
         self.register_listener("import_task_files", self.import_task_files)
+        self._import_synoindex_binary()
 
     def commands(self):
         commands = []
@@ -289,13 +290,16 @@ class SynologySyncPlugin(BeetsPlugin):
         return song, candidates
 
     def _local_synoindex(self):
-        """Return the synoindex binary when beets runs on the AudioStation NAS."""
+        """Return the executable synoindex binary or a user-provided wrapper."""
         for candidate in (shutil.which("synoindex"), SYNOINDEX):
             if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return candidate
         raise ui.UserError(
             "synoindex not found: beet synoindex must run on the Synology NAS "
-            "hosting AudioStation"
+            "hosting AudioStation, or have an executable synoindex wrapper on PATH. "
+            "For Beets in Docker, consider simple-synoindex-server on the NAS "
+            "to expose synoindex through an API; a wrapper calling that API "
+            "must be provided separately (no built-in API client)"
         )
 
     def _run_synoindex(self, binary, directory):
@@ -314,16 +318,26 @@ class SynologySyncPlugin(BeetsPlugin):
             return False
         return True
 
-    def import_task_files(self, session, task):
-        """Reindex the final directories of an album or singleton after import."""
+    def _import_synoindex_binary(self):
         if not self.config["synoindex_on_import"].get(bool):
-            return
+            return None
         try:
-            binary = self._local_synoindex()
+            return self._local_synoindex()
         except ui.UserError as exc:
             if not self._import_synoindex_warned:
                 self._import_synoindex_warned = True
-                self._log.warning("{}; skipping reindex after import", exc)
+                self._log.warning(
+                    "{}; skipping reindex after import. "
+                    "Set synologysync.synoindex_on_import: no to disable automatic "
+                    "reindexing and silence this warning",
+                    exc,
+                )
+            return None
+
+    def import_task_files(self, session, task):
+        """Reindex the final directories of an album or singleton after import."""
+        binary = self._import_synoindex_binary()
+        if binary is None:
             return
         directories = _unique(
             os.fsdecode(util.ancestry(util.normpath(item.path))[-1])
