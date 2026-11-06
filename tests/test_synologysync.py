@@ -686,6 +686,26 @@ class PluginTest(unittest.TestCase):
         self.assertIsNone(mapping.to_syno(self.music + "-other/a.mp3"))
         self.assertIsNone(mapping.to_syno(self.music + "/../outside.mp3"))
 
+    def test_reverse_mapping_respects_boundaries_and_forward_rules(self):
+        mapping = PathMapping([
+            {"local": self.music, "syno": "/music"},
+            {"local": self.music + "/special", "syno": "/personal"},
+            {"local": self.music + "/mirror", "syno": "/music"},
+        ])
+        self.assertEqual(
+            set(mapping.to_local("/music/one.mp3")),
+            {self.music + "/one.mp3", self.music + "/mirror/one.mp3"},
+        )
+        self.assertEqual(
+            mapping.to_local("/personal/a.mp3"),
+            [self.music + "/special/a.mp3"],
+        )
+        self.assertNotIn(
+            self.music + "/special/a.mp3",
+            mapping.to_local("/music/special/a.mp3"),
+        )
+        self.assertEqual(mapping.to_local("/music-other/a.mp3"), [])
+
     def test_playlist_import_obeys_query_and_relative_paths(self):
         self.plugin.sync_playlists(self.lib, self.options(), ["title:one"])
         path = os.path.join(self.playlists, "P_alice_favourites.m3u")
@@ -1730,16 +1750,68 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "beets-alice": 8})
         self.assertEqual(parse(self.two.get("userrating")), {})
 
-    def test_rating_import_intersects_beets_query(self):
+    def test_rating_with_query_rejected_before_loading_or_connection(self):
+        for dest in ("beet", "syno"):
+            for rating in (0, 8):
+                for query in (["title:two"], ["selection:yes"]):
+                    with self.subTest(dest=dest, rating=rating, query=query), \
+                            patch.object(self.lib, "items") as items, \
+                            self.assertRaisesRegex(
+                                ui.UserError,
+                                "--rating cannot be combined with a beets query",
+                            ):
+                        self.plugin.sync_ratings(
+                            self.lib,
+                            self.options(0, (f"--rating={rating}", f"--dest={dest}")),
+                            query,
+                        )
+                    items.assert_not_called()
+        self.password.assert_not_called()
+        self.client_patch.target.AudioStation.assert_not_called()
+
+    def test_filtered_rating_import_pretend_does_not_store_or_prompt(self):
+        self.prepare_ratings()
+        self.one["userrating"] = {"beets-alice": 2}
+        self.one.store()
+        self.client.songs.return_value = [self.client.songs.return_value[0]]
+        with patch.object(Item, "store") as store, \
+                patch("beetsplug.synologysync.ui.input_options") as prompt:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--rating=8", "--pretend")), []
+            )
+        store.assert_not_called()
+        prompt.assert_not_called()
+        self.client.set_rating.assert_not_called()
+
+    def test_filtered_rating_import_only_loads_remote_candidates(self):
         parse = self.prepare_ratings()
-        self.plugin.sync_ratings(
-            self.lib, self.options(0, ("--rating=8",)), ["title:two"]
-        )
-        self.client.songs.assert_called_once_with(title="two", rating=4)
+        self.client.songs.return_value = [self.client.songs.return_value[0]]
+        with patch.object(self.lib, "items", wraps=self.lib.items) as items, \
+                patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--rating=8",)), []
+            )
+        self.assertEqual(items.call_count, 1)
+        query = items.call_args.args[0]
+        self.assertEqual([item.id for item in self.lib.items(query)], [self.one.id])
+        processed = [
+            c for c in info.call_args_list
+            if c.args[0] == "Processing song ({}/{}): {}"
+        ]
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0].args[1:], (1, 1, self.one.path))
         self.one.load()
-        self.two.load()
-        self.assertEqual(parse(self.one.get("userrating")), {})
-        self.assertEqual(parse(self.two.get("userrating")), {})
+        self.assertEqual(parse(self.one.get("userrating")), {"beets-alice": 8})
+
+    def test_filtered_rating_import_empty_remote_does_not_load_beets(self):
+        self.prepare_ratings()
+        self.client.songs.return_value = []
+        with patch.object(self.lib, "items", wraps=self.lib.items) as items:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--rating=8",)), []
+            )
+        items.assert_not_called()
+        self.client.close.assert_called_once()
 
     def test_rating_import_zero_and_filtered_remote_results(self):
         parse = self.prepare_ratings()
@@ -1763,7 +1835,7 @@ class PluginTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.options(0, ("--rating=4.5",))
 
-    def test_rating_export_filters_selected_user_and_query(self):
+    def test_rating_export_filters_selected_user(self):
         self.prepare_ratings()
         self.one["userrating"] = {"beets-bob": 6, "beets-alice": 2}
         self.two["userrating"] = {"beets-bob": 8, "beets-alice": 6}
@@ -1772,8 +1844,6 @@ class PluginTest(unittest.TestCase):
         opts = self.options(
             0, ("--rating=6", "--dest=syno", "--beetuser=bob", "--force")
         )
-        self.plugin.sync_ratings(self.lib, opts, ["title:two"])
-        self.password.assert_not_called()
         self.plugin.sync_ratings(self.lib, opts, [])
         self.client.songs.assert_called_once_with()
         self.client.set_rating.assert_called_once_with("1", 3)

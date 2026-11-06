@@ -164,11 +164,16 @@ Equal ratings require no change.
 `--rating N` selects the **source** rating on the beets 0–10 scale, not the
 destination rating. With `--dest=beet`, AudioStation is queried for exactly
 `N / 2` stars, fetching all matching songs with pagination; only songs mapped to
-beets items are updated. Import accepts even values only (0, 2, 4, 6, 8, 10),
+beets items are updated. Processing starts from these
+AudioStation songs and looks up their mapped local paths in beets, without
+loading or iterating over the entire beets library. Import accepts even values
+only (0, 2, 4, 6, 8, 10),
 because AudioStation has no half-star ratings. With `--dest=syno`, only beets
 items whose selected `beets-<user>` rating equals `N` are exported; odd values
 are rounded up as usual. Zero is a valid filter in either direction.
-Any positional beets query further restricts the selection. Existing conflict
+`--rating` cannot be combined with a positional beets query; the command rejects
+this combination in either direction. Without `--rating`, beets queries remain
+supported. Existing conflict
 handling and `--force` still apply. This filters ratings; it does not assign a
 new rating to otherwise unmatched songs.
 
