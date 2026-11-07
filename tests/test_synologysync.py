@@ -1947,6 +1947,18 @@ class PluginTest(unittest.TestCase):
         )
         self.client.set_rating.assert_called_once_with("1", 4)
 
+    def test_zero_remote_rating_is_not_a_conflict_for_rating_export(self):
+        self.prepare_ratings()
+        self.one["userrating"] = {"alice": 8}
+        self.one.store()
+        self.client.songs.return_value[0]["additional"]["song_rating"]["rating"] = 0
+        with patch("beetsplug.synologysync.ui.input_options") as prompt:
+            self.plugin.sync_ratings(
+                self.lib, self.options(0, ("--dest=syno",)), ["title:one"]
+            )
+        prompt.assert_not_called()
+        self.client.set_rating.assert_called_once_with("1", 4)
+
     def test_existing_rating_keep_and_force(self):
         parse = self.prepare_ratings()
         self.one["userrating"] = {"alice": 0}

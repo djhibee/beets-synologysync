@@ -626,6 +626,9 @@ class SynologySyncPlugin(BeetsPlugin):
                         self._log.debug("No local rating for {}: skipping", item.path)
                         continue
                     source, destination = (local + 1) // 2, remote
+                destination_exists = destination is not None and not (
+                    opts.dest == "syno" and destination == 0
+                )
                 if source == destination:
                     self._log.debug(
                         "Rating already in sync for {}: {}", item.path, destination
@@ -639,10 +642,10 @@ class SynologySyncPlugin(BeetsPlugin):
                         destination,
                         source,
                         " [would ask update/keep]"
-                        if destination is not None and not force else "",
+                        if destination_exists and not force else "",
                     )
                     continue
-                if destination is not None and not force:
+                if destination_exists and not force:
                     self._log.info("Rating exists for {}: {}", item.path, destination)
                     if ui.input_options(("update", "keep")) == "k":
                         continue
