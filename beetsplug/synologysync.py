@@ -528,7 +528,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 if not items:
                     self._log.info("No beets items match the source rating")
                     return
-            elif not args or len(items) >= threshold:
+            elif (rating is None and not args) or len(items) >= threshold:
                 songs = self._song_index(client)
             else:
                 songs = None

@@ -1845,6 +1845,7 @@ class PluginTest(unittest.TestCase):
         opts = self.options(
             0, ("--rating=6", "--dest=syno", "--beetuser=bob", "--force")
         )
+        self.plugin.config["SingleAPICallThreshold"] = 2
         with patch.object(self.lib, "items", wraps=self.lib.items) as items, \
                 patch.object(
                     Results, "_make_model", autospec=True,
@@ -1857,7 +1858,7 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(query.pattern, [self.one.id])
         self.assertTrue(query.fast)
         self.assertEqual([item.id for item in self.lib.items(query)], [self.one.id])
-        self.client.songs.assert_called_once_with()
+        self.client.songs.assert_called_once_with(rating=None, title="one")
         self.client.set_rating.assert_called_once_with("1", 3)
 
     def test_filtered_rating_export_empty_selection_does_not_load_items_or_connect(self):
@@ -1881,6 +1882,7 @@ class PluginTest(unittest.TestCase):
             0, ("--rating=6", "--synouser=djhibee", "--beetuser=djhibee",
                 "--dest=syno", "--force")
         )
+        self.plugin.config["SingleAPICallThreshold"] = 2
         with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
             self.plugin.sync_ratings(self.lib, opts, [])
         messages = [record.getMessage() for record in logs.records]
