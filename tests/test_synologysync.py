@@ -1819,8 +1819,11 @@ class PluginTest(unittest.TestCase):
         type_patch.start()
         self.addCleanup(type_patch.stop)
         self.plugins_patch.stop()
+        self.userrating_plugin = BeetsPlugin(name="userrating")
+        self.userrating_plugin.should_write = Mock(return_value=False)
+        self.userrating_plugin.write_item = Mock(return_value=True)
         self.plugins_patch = patch("beetsplug.synologysync.plugins.find_plugins",
-                                  return_value=[BeetsPlugin(name="userrating")])
+                                  return_value=[self.userrating_plugin])
         self.plugins_patch.start()
         self.addCleanup(self.plugins_patch.stop)
         return ratings_module.as_ratings
@@ -1835,6 +1838,91 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(parse(self.one.get("userrating")), {"other": 3, "alice": 8})
         self.assertEqual(parse(self.two.get("userrating")), {})
         self.client.close.assert_called_once()
+
+    def test_rating_import_respects_userrating_write_and_import_fallback(self):
+        parse = self.prepare_ratings()
+        for write, import_write, expected in (
+            (True, False, True),
+            (False, True, False),
+            (None, True, True),
+            (None, False, False),
+        ):
+            with self.subTest(write=write, import_write=import_write):
+                config["userrating"]["write"] = write
+                config["import"]["write"] = import_write
+                self.userrating_plugin.should_write.reset_mock()
+                self.userrating_plugin.should_write.side_effect = lambda: (
+                    config["userrating"]["write"].get()
+                    if config["userrating"]["write"].get() is not None
+                    else ui.should_write()
+                )
+                self.userrating_plugin.write_item.reset_mock()
+                self.one["userrating"] = {"other": 3}
+                self.one.mtime = 10
+                self.one.store()
+
+                def write_item(item):
+                    stored = self.lib.get_item(item.id)
+                    self.assertEqual(parse(stored.get("userrating")),
+                                     {"other": 3, "alice": 8})
+                    self.assertEqual(stored.mtime, 10)
+                    return True
+
+                self.userrating_plugin.write_item.side_effect = write_item
+                with patch.object(Item, "current_mtime", return_value=20) as mtime:
+                    self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+                self.one.load()
+                self.assertEqual(parse(self.one.get("userrating")),
+                                 {"other": 3, "alice": 8})
+                self.userrating_plugin.should_write.assert_called_once_with()
+                if expected:
+                    self.userrating_plugin.write_item.assert_called_once()
+                    self.assertEqual(self.userrating_plugin.write_item.call_args.args[0].id,
+                                     self.one.id)
+                    mtime.assert_called_once_with()
+                    self.assertEqual(self.one.mtime, 20)
+                else:
+                    self.userrating_plugin.write_item.assert_not_called()
+                    mtime.assert_not_called()
+                    self.assertEqual(self.one.mtime, 10)
+
+    def test_rating_import_failed_file_write_preserves_mtime(self):
+        parse = self.prepare_ratings()
+        self.userrating_plugin.should_write.return_value = True
+        self.userrating_plugin.write_item.return_value = False
+        self.one.mtime = 10
+        self.one.store()
+        with patch.object(Item, "current_mtime") as mtime:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:one"])
+        self.userrating_plugin.write_item.assert_called_once()
+        mtime.assert_not_called()
+        self.one.load()
+        self.assertEqual(parse(self.one.get("userrating")), {"alice": 8})
+        self.assertEqual(self.one.mtime, 10)
+
+    def test_rating_file_write_only_for_changed_nonpretend_imports(self):
+        self.prepare_ratings()
+        self.userrating_plugin.should_write.return_value = True
+        for local_rating, arguments in (
+            (8, ()),
+            (2, ()),
+            (2, ("--pretend", "--force")),
+            (2, ("--dest=syno", "--force")),
+            (2, ("--dest=syno", "--pretend", "--force")),
+        ):
+            with self.subTest(local_rating=local_rating, arguments=arguments):
+                self.one["userrating"] = {"alice": local_rating}
+                self.one.store()
+                with patch("beetsplug.synologysync.ui.input_options", return_value="k"), \
+                        patch.object(Item, "store") as store, \
+                        patch.object(Item, "current_mtime") as mtime:
+                    self.plugin.sync_ratings(
+                        self.lib, self.options(0, arguments), ["title:one"]
+                    )
+                store.assert_not_called()
+                mtime.assert_not_called()
+                self.userrating_plugin.should_write.assert_not_called()
+                self.userrating_plugin.write_item.assert_not_called()
 
     def test_rating_debug_stages_precede_password_prompt(self):
         self.prepare_ratings()
