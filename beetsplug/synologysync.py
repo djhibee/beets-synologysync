@@ -922,7 +922,14 @@ class SynologySyncPlugin(BeetsPlugin):
                 if path:
                     entries.append(path)
                 else:
-                    self._log.debug("Skipping song outside query/mapping: {}", song_path(song))
+                    remote_path = song_path(song)
+                    local_paths = mapping.to_local(remote_path)
+                    local_target = ", ".join(local_paths) if local_paths else "no mapping"
+                    self._log.debug(
+                        "Skipping song outside query/mapping: {} (local target: {})",
+                        remote_path,
+                        local_target,
+                    )
             if not entries and queried:
                 continue
             path = local.get(name, os.path.join(directory, name + ".m3u"))
