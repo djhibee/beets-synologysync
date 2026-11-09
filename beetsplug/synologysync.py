@@ -484,7 +484,7 @@ class SynologySyncPlugin(BeetsPlugin):
                     "--rating must be even for --dest=beet (AudioStation uses whole stars)"
                 )
         with self._debug_stage("userrating plugin lookup and ratings import"):
-            self._plugin("userrating")
+            userrating_plugin = self._plugin("userrating")
             try:
                 from beetsplug.userrating.ratings import (
                     as_ratings,
@@ -697,6 +697,9 @@ class SynologySyncPlugin(BeetsPlugin):
                     updated[user] = validate_rating(source)
                     item["userrating"] = updated
                     item.store()
+                    if userrating_plugin.should_write() and userrating_plugin.write_item(item):
+                        item.mtime = item.current_mtime()
+                        item.store()
                 else:
                     client.set_rating(song["id"], source)
                 self._log.info(

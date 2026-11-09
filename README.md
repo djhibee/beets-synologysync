@@ -151,9 +151,13 @@ The ratings mapping uses the key `<user>`, where `<user>` comes from
 `--beetuser`, `beetuser` configuration, or the effective Synology username, in
 that order. Other users' ratings are left unchanged. This key is the userrating
 database key, without the `beets-` prefix used in file tags; userrating
-independently controls how it names file tags. Ratings
-are stored in the beets database; use beets' normal tag-writing workflow if
-you also want file tags updated.
+independently controls how it names file tags. Changed ratings imported with
+`--dest=beet` are stored in the beets database and written to local files when
+`userrating.write` is enabled (falling back to `import.write` when unset), just
+like `beet userrating`. After a successful file write, the item's modification
+time is refreshed and saved. Unchanged or kept ratings and `--pretend` never
+write files. `--dest=syno` writes only to AudioStation, regardless of these
+local file-writing settings.
 
 AudioStation's 0–5 ratings are mapped to userrating's 0–10 scale. Export rounds
 odd ratings to the next whole star (7 becomes 4). Explicit zero is synchronized;
