@@ -16,6 +16,7 @@ from beets.plugins import BeetsPlugin
 from beetsplug._synology import AudioStation, SynologyError, song_path
 from beetsplug._synology_playlists import (
     OwnerAliases,
+    decode_name,
     is_smart,
     playlist_category,
     playlist_identity,
@@ -162,7 +163,49 @@ class SynologySyncPlugin(BeetsPlugin):
         )
         command.func = self.synoindex
         commands.append(command)
+        command = ui.Subcommand(
+            "synoowner",
+            help="manage playlist owner aliases: list, show, add, update, delete",
+        )
+        command.func = self.owner_aliases
+        commands.append(command)
         return commands
+
+    def owner_aliases(self, lib, opts, args):
+        args = ui.decargs(args)
+        usage = (
+            "Usage: beet synoowner list | show <alias> | "
+            "add <alias> <owner> | update <alias> <owner> | delete <alias>"
+        )
+        counts = {"list": 1, "show": 2, "add": 3, "update": 3, "delete": 2}
+        if not args or len(args) != counts.get(args[0]):
+            raise ui.UserError(usage)
+        aliases = OwnerAliases(lib)
+        action = args[0]
+        if action == "list":
+            mappings = aliases.mappings()
+            if not mappings:
+                ui.print_("No playlist owner mappings")
+            for alias, owner in mappings:
+                ui.print_(f"{alias}\t{owner}")
+        elif action == "show":
+            ui.print_(f"{args[1]}\t{aliases.owner(args[1])}")
+        else:
+            if action == "add":
+                aliases.create(args[1], args[2])
+            elif action == "update":
+                aliases.update(args[1], args[2])
+            else:
+                aliases.delete(args[1])
+            self._log.info("Playlist owner mapping {}: {}", action, args[1])
+
+    def _prompt_playlist_owner(self, label):
+        owner = ui.input_(
+            f"Full AudioStation owner username for {label} (empty to cancel): "
+        )
+        if not owner.strip():
+            raise ui.UserError("Playlist owner resolution cancelled")
+        return owner
 
     def _force(self, opts, kind):
         value = self.config["force"].get()
@@ -768,7 +811,7 @@ class SynologySyncPlugin(BeetsPlugin):
             # The alias namespace spans categories: validate every existing
             # encoded filename before allocating aliases for incoming owners.
             for stem in local:
-                aliases.identity(stem)
+                aliases.identity(stem, self._prompt_playlist_owner)
         username = self._username(opts)
         with self._connect(opts) as client:
             remote = {}
@@ -810,18 +853,34 @@ class SynologySyncPlugin(BeetsPlugin):
                         and ("shared" if stem.startswith("G_") else "personal") != library
                     ):
                         continue
-                    identity = aliases.identity(stem)
-                    encoded = identity is not None
-                    original = identity[2] if identity else stem
-                    if identity is None and stem.startswith(("%47_", "%50_")):
+                    # Filter by name before asking about an unselected owner.
+                    encoded = stem.startswith(("G_", "P_"))
+                    if encoded:
+                        parts = stem.split("_", 2)
+                        if len(parts) != 3:
+                            raise ui.UserError(f"Invalid encoded playlist filename: {stem}")
+                        original = decode_name(parts[2])
+                    elif stem.startswith(("%47_", "%50_")):
                         original = chr(int(stem[1:3], 16)) + stem[3:]
+                    else:
+                        original = stem
                     if opts.playlist and opts.playlist not in local and original != opts.playlist:
                         continue
+                    identity = aliases.identity(stem, self._prompt_playlist_owner)
                     if identity is None:
                         identity = creation_library, username, original
                     if library != "all" and identity[0] != library:
                         raise ui.UserError("New playlist library is outside --library; set playlist_library")
                     existing = remote.get(identity)
+                    if identity[1] is None and not existing:
+                        if opts.pretend:
+                            raise ui.UserError(
+                                f"Cannot resolve unavailable owner in pretend mode: {stem}; "
+                                "reimport with an explicit owner before exporting"
+                            )
+                        owner = self._prompt_playlist_owner(stem)
+                        identity = identity[0], owner, identity[2]
+                        existing = remote.get(identity)
                     if not existing:
                         # An ownerless smart entry can only block a write, never
                         # supply an identity for an update or creation.

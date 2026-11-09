@@ -431,7 +431,7 @@ class PluginTest(unittest.TestCase):
     def test_playlist_command_name_and_options(self):
         commands = self.plugin.commands()
         self.assertEqual([command.name for command in commands],
-                         ["syncSynoRatings", "syncSynoPlaylist", "synoindex"])
+                         ["syncSynoRatings", "syncSynoPlaylist", "synoindex", "synoowner"])
         command = commands[1]
         self.assertEqual(command.func, self.plugin.sync_playlists)
         opts, args = command.parser.parse_args(
@@ -985,6 +985,163 @@ class PluginTest(unittest.TestCase):
             columns = tx.query("PRAGMA table_info(synologysync_owner_aliases)")
         self.assertEqual([row["name"] for row in columns], ["alias", "owner"])
 
+    def test_owner_mapping_commands_crud_and_persistence(self):
+        command = next(c for c in self.plugin.commands() if c.name == "synoowner")
+        opts, _ = command.parser.parse_args([])
+        with patch("beetsplug.synologysync.ui.print_") as output:
+            command.func(self.lib, opts, ["list"])
+            output.assert_called_with("No playlist owner mappings")
+            command.func(self.lib, opts, ["add", "toto", "full_username"])
+            command.func(self.lib, opts, ["show", "toto"])
+            output.assert_called_with("toto\tfull_username")
+            command.func(self.lib, opts, ["update", "toto", "another_username"])
+            command.func(self.lib, opts, ["list"])
+            output.assert_called_with("toto\tanother_username")
+            database = self.lib.path
+            self.lib._close()
+            self.lib = Library(database)
+            self.addCleanup(self.lib._close)
+            self.assertEqual(OwnerAliases(self.lib).owner("toto"), "another_username")
+            command.func(self.lib, opts, ["delete", "toto"])
+            self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+        self.password.assert_not_called()
+        self.client.save_playlist.assert_not_called()
+
+    def test_owner_mapping_commands_reject_invalid_arguments(self):
+        for args in ([], ["unknown"], ["add", "alias"], ["list", "extra"],
+                     ["delete"], ["show"], ["update", "alias"]):
+            with self.subTest(args=args), self.assertRaisesRegex(ui.UserError, "Usage:"):
+                self.plugin.owner_aliases(self.lib, None, args)
+
+    def test_owner_mapping_validation_and_uniqueness(self):
+        aliases = OwnerAliases(self.lib)
+        aliases.create("toto", "alice")
+        aliases.create("bob", "bob")
+        for alias in ("", "toolongxx", "../bad", "a_b", "snow☃"):
+            with self.subTest(alias=alias), self.assertRaises(ui.UserError):
+                aliases.create(alias, "other")
+        for owner in ("", "   ", None):
+            with self.subTest(owner=owner), self.assertRaises(ui.UserError):
+                aliases.create("new", owner)
+        for operation, args in (
+            (aliases.create, ("toto", "other")),
+            (aliases.create, ("other", "alice")),
+            (aliases.update, ("toto", "bob")),
+            (aliases.update, ("missing", "other")),
+            (aliases.delete, ("missing",)),
+            (aliases.owner, ("missing",)),
+        ):
+            with self.subTest(operation=operation, args=args), self.assertRaises(ui.UserError):
+                operation(*args)
+        self.assertEqual(aliases.mappings(), [("bob", "bob"), ("toto", "alice")])
+
+    def test_export_unknown_alias_prompts_once_and_saves_mapping(self):
+        self.local_playlist("P_toto_favourites")
+        self.local_playlist("P_toto_second")
+        self.client.playlists.return_value += [
+            self.remote_playlist(name="second", playlist_id="p2")
+        ]
+        opts = self.options(arguments=("--dest=syno", "--force"))
+        with patch("beetsplug.synologysync.ui.input_", return_value="alice") as prompt:
+            self.plugin.sync_playlists(self.lib, opts, [])
+        prompt.assert_called_once()
+        self.assertEqual(OwnerAliases(self.lib).owner("toto"), "alice")
+        self.assertEqual(self.client.save_playlist.call_args_list, [
+            call("favourites", ["1"], "p1", library="personal"),
+            call("second", ["1"], "p2", library="personal"),
+        ])
+        with patch("beetsplug.synologysync.ui.input_") as prompt:
+            self.plugin.sync_playlists(self.lib, opts, [])
+        prompt.assert_not_called()
+
+    def test_import_can_restore_lost_alias_without_rebinding_collision(self):
+        path = self.local_playlist("G_longuser_favourites")
+        self.client.playlists.return_value = [
+            self.remote_playlist(
+                owner="longusername-two", library="shared", playlist_id="g2"
+            )
+        ]
+        with patch("beetsplug.synologysync.ui.input_", return_value="longusername-one"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--library=shared", "--force")), []
+            )
+        self.assertEqual(OwnerAliases(self.lib).owner("longuser"), "longusername-one")
+        self.assertEqual(OwnerAliases(self.lib).alias("longusername-two"), "longuse1")
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.playlists, "G_longuse1_favourites.m3u"
+        )))
+        self.assertEqual(self.plugin._read_playlist(path, self.playlists),
+                         [os.fsdecode(self.one.path)])
+
+    def test_unknown_alias_pretend_never_prompts_or_saves_mapping(self):
+        self.local_playlist("P_toto_favourites")
+        for dest in ("beet", "syno"):
+            with self.subTest(dest=dest), \
+                    patch("beetsplug.synologysync.ui.input_") as prompt, \
+                    self.assertRaisesRegex(ui.UserError, "beet synoowner add toto"):
+                self.plugin.sync_playlists(
+                    self.lib, self.options(arguments=(f"--dest={dest}", "--pretend")), []
+                )
+            prompt.assert_not_called()
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+        self.client.save_playlist.assert_not_called()
+
+    def test_export_does_not_prompt_for_unselected_alias_by_original_name(self):
+        self.local_playlist("P_unknown_unselected")
+        self.local_playlist("P_alice_favourites")
+        OwnerAliases(self.lib).alias("alice")
+        with patch("beetsplug.synologysync.ui.input_") as prompt:
+            self.plugin.sync_playlists(
+                self.lib,
+                self.options(arguments=("--dest=syno", "--force", "-p", "favourites")),
+                [],
+            )
+        prompt.assert_not_called()
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], "p1", library="personal"
+        )
+
+    def test_unknown_alias_manual_owner_cannot_create_for_another_user(self):
+        self.local_playlist("P_toto_missing")
+        with patch("beetsplug.synologysync.ui.input_", return_value="bob"), \
+                self.assertRaisesRegex(ui.UserError, "another owner"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_unknown_alias_cannot_map_owner_already_using_another_alias(self):
+        OwnerAliases(self.lib).alias("alice")
+        self.local_playlist("P_toto_favourites")
+        with patch("beetsplug.synologysync.ui.input_", return_value="alice"), \
+                self.assertRaisesRegex(ui.UserError, "already mapped"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [("alice", "alice")])
+
+    def test_manual_owner_resolution_still_rejects_duplicate_targets_before_writing(self):
+        self.local_playlist("P_toto_favourites")
+        self.local_playlist("favourites")
+        with patch("beetsplug.synologysync.ui.input_", return_value="alice"), \
+                self.assertRaisesRegex(ui.UserError, "Ambiguous local playlist identity"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.client.save_playlist.assert_not_called()
+
+    def test_invalid_name_never_prompts_or_persists_an_unknown_alias(self):
+        self.local_playlist("P_toto_%ZZ")
+        with patch("beetsplug.synologysync.ui.input_") as prompt, \
+                self.assertRaisesRegex(ui.UserError, "Invalid encoded playlist name"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        prompt.assert_not_called()
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+        self.client.save_playlist.assert_not_called()
+
     def test_owner_alias_concurrent_allocation_is_unique_and_stable(self):
         other_lib = Library(self.lib.path)
         self.addCleanup(other_lib._close)
@@ -1175,7 +1332,8 @@ class PluginTest(unittest.TestCase):
 
     def test_unknown_alias_is_not_replaced_by_remote_owner(self):
         self.local_playlist("P_unknown_favourites")
-        with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+        with patch("beetsplug.synologysync.ui.input_", return_value=""), \
+                self.assertRaisesRegex(ui.UserError, "cancelled"):
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno", "--force")), []
             )
@@ -1195,7 +1353,8 @@ class PluginTest(unittest.TestCase):
         ]
         for arguments in (("--force",), ("--conflict=skip",)):
             with self.subTest(arguments=arguments):
-                with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+                with patch("beetsplug.synologysync.ui.input_", return_value=""), \
+                        self.assertRaisesRegex(ui.UserError, "cancelled"):
                     self.plugin.sync_playlists(
                         self.lib, self.options(arguments=arguments), []
                     )
@@ -1208,7 +1367,8 @@ class PluginTest(unittest.TestCase):
                     [os.fsdecode(self.one.path)],
                 )
         self.password.assert_not_called()
-        with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+        with patch("beetsplug.synologysync.ui.input_", return_value=""), \
+                self.assertRaisesRegex(ui.UserError, "cancelled"):
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno", "--force")), []
             )
@@ -1226,7 +1386,8 @@ class PluginTest(unittest.TestCase):
                 owner="longusername-two", library="shared", playlist_id="g2"
             )
         ]
-        with self.assertRaisesRegex(ui.UserError, "Unknown playlist owner alias"):
+        with patch("beetsplug.synologysync.ui.input_", return_value=""), \
+                self.assertRaisesRegex(ui.UserError, "cancelled"):
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--library=shared", "--force")), []
             )
@@ -1507,7 +1668,8 @@ class PluginTest(unittest.TestCase):
 
     def test_ownerless_encoded_missing_target_cannot_be_created_for_login(self):
         self.local_playlist("G__missing")
-        with self.assertRaisesRegex(ui.UserError, "unavailable owner"):
+        with patch("beetsplug.synologysync.ui.input_", return_value=""), \
+                self.assertRaisesRegex(ui.UserError, "cancelled"):
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno", "--force")), []
             )
@@ -1518,10 +1680,36 @@ class PluginTest(unittest.TestCase):
         self.client.playlists.return_value = [
             self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
         ]
-        with self.assertRaisesRegex(ui.UserError, "unavailable owner"):
+        with patch("beetsplug.synologysync.ui.input_", return_value=""), \
+                self.assertRaisesRegex(ui.UserError, "cancelled"):
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno", "--force")), []
             )
+        self.client.save_playlist.assert_not_called()
+
+    def test_ownerless_missing_target_manual_owner_resolves_remote_id(self):
+        self.local_playlist("G__favourites")
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g1")
+        ]
+        with patch("beetsplug.synologysync.ui.input_", return_value="bob") as prompt:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        prompt.assert_called_once()
+        self.client.save_playlist.assert_called_once_with(
+            "favourites", ["1"], "g1", library="shared"
+        )
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+
+    def test_ownerless_missing_target_pretend_never_prompts(self):
+        self.local_playlist("G__missing")
+        with patch("beetsplug.synologysync.ui.input_") as prompt, \
+                self.assertRaisesRegex(ui.UserError, "pretend mode"):
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--pretend")), []
+            )
+        prompt.assert_not_called()
         self.client.save_playlist.assert_not_called()
 
     def test_known_owner_encoded_target_does_not_match_ownerless_remote(self):

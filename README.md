@@ -240,14 +240,36 @@ digits, or hyphens. Unsafe owner characters (including underscores) are replaced
 in the alias; truncation/sanitization collisions get numeric suffixes. The exact
 owner is retained in the beets SQLite table `synologysync_owner_aliases`, so aliases
 remain stable across runs and database reopening. Keep this database with the
-playlist files: unknown aliases fail rather than guessing an owner.
+playlist files. When an alias is unknown, synchronization asks for its full
+AudioStation owner username and saves that mapping under the alias from the
+filename. Empty input cancels synchronization; owners are never guessed, even
+with `--force`. In `--pretend` mode there is no prompt or mapping write:
+restore the mapping first with `synoowner`.
 Before allocating aliases for imports, every existing encoded filename is
 validated against the saved map, even across category selections. A lost or
 incomplete alias table therefore cannot silently reassign an old filename to a
-new owner with the same shortened alias; restore the map before importing.
+new owner with the same shortened alias; missing mappings must be restored
+manually or through the prompt before importing.
 When a shared playlist's owner is unavailable in the API, its explicit filename
 is `G__<original name>.m3u`: the empty alias means **unknown owner**, not the login
 user, and does not create an alias-table entry.
+
+Manage the mappings locally, without connecting to AudioStation:
+
+```sh
+beet synoowner list
+beet synoowner show toto
+beet synoowner add toto full_username
+beet synoowner update toto corrected_username
+beet synoowner delete toto
+```
+
+`list` and `show` print alias/owner pairs. `add` requires a new alias; `update`
+changes the owner of an existing alias. Aliases and owners must both be unique,
+and aliases must contain one to eight ASCII letters, digits, or hyphens.
+Quote usernames containing spaces. Updating a mapping intentionally changes
+the destination identity of every file using that alias; deleting one causes
+those files to require recovery at the next synchronization.
 
 Original names retain underscores; filenames are parsed with only the first two
 underscores as delimiters. UTF-8 percent escaping preserves unsafe characters,
@@ -291,8 +313,11 @@ metadata is used when supplied by the API (top-level `owner` or
 `additional.owner`). An ownerless shared filename matches only a remote shared
 playlist with the same original name and still-unavailable owner; multiple such
 entries are ambiguous and fail even with force. If that remote playlist disappears
-or later gains owner metadata, export fails instead of guessing or creating for
-the login user: reimport to obtain the updated identity. Likewise, an encoded
+or later gains owner metadata, export asks for the full owner instead of guessing
+or creating for the login user. This owner is used only for that export because
+an empty alias cannot identify a persistent owner; reimport to obtain a stable,
+explicit-owner filename. In `--pretend` mode this unresolved export fails without
+prompting. Likewise, an encoded
 known-owner filename never updates an ownerless normal remote target. If an
 encoded playlist's owner is no longer present remotely, a new playlist is never
 silently created for a different logged-in user. Existing shared owners are honored via
