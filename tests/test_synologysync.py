@@ -714,6 +714,16 @@ class PluginTest(unittest.TestCase):
         self.client.close.assert_called_once()
         self.password.assert_called_once()
 
+    def test_playlist_import_logs_songs_to_beets_at_debug(self):
+        with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            self.plugin.sync_playlists(self.lib, self.options(), ["title:one"])
+        message = "\n".join(record.getMessage() for record in logs.records)
+        self.assertIn(
+            f"Playlist P_alice_favourites -> beets: {os.fsdecode(self.one.path)}",
+            message,
+        )
+        self.assertNotIn(os.fsdecode(self.two.path), message)
+
     def test_playlist_export_query_and_name_filter(self):
         path = os.path.join(self.playlists, "favourites.m3u")
         self.plugin._write_playlist(path, self.playlists,
@@ -725,6 +735,25 @@ class PluginTest(unittest.TestCase):
         self.client.save_playlist.assert_called_once_with(
             "favourites", ["1"], "p1", library="personal"
         )
+
+    def test_playlist_export_logs_songs_to_audiostation_at_debug(self):
+        path = os.path.join(self.playlists, "favourites.m3u")
+        self.plugin._write_playlist(
+            path, self.playlists,
+            [os.fsdecode(self.two.path), os.fsdecode(self.one.path)],
+        )
+        with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")),
+                ["title:one"],
+            )
+        message = "\n".join(record.getMessage() for record in logs.records)
+        self.assertIn(
+            f"Playlist favourites -> AudioStation: {os.fsdecode(self.one.path)} "
+            f"(/music/one.mp3)",
+            message,
+        )
+        self.assertNotIn(os.fsdecode(self.two.path), message)
 
     def test_playlist_import_does_not_fetch_song_library(self):
         self.plugin.sync_playlists(self.lib, self.options(), [])

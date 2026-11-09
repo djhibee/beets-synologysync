@@ -931,6 +931,8 @@ class SynologySyncPlugin(BeetsPlugin):
                 continue
             if policy == "merge" and name in local:
                 entries = _unique(self._read_playlist(path, base) + entries)
+            for entry in entries:
+                self._log.debug("Playlist {} -> beets: {}", name, entry)
             if opts.pretend:
                 self._log.info(
                     "Would sync playlist to beets ({}): {} ({} songs)",
@@ -1008,6 +1010,10 @@ class SynologySyncPlugin(BeetsPlugin):
                     )
                 found[syno_path] = song
                 ids.append(song["id"])
+            for entry, syno_path in mapped:
+                self._log.debug(
+                    "Playlist {} -> AudioStation: {} ({})", name, entry, syno_path
+                )
             if policy == "merge" and existing:
                 ids = _unique(
                     [song["id"] for song in client.playlist_songs(existing["id"])] + ids
