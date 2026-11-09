@@ -722,7 +722,11 @@ class PluginTest(unittest.TestCase):
             f"Playlist P_alice_favourites -> beets: {os.fsdecode(self.one.path)}",
             message,
         )
-        self.assertNotIn(os.fsdecode(self.two.path), message)
+        self.assertIn(
+            f"Skipping song outside query/mapping: /music/two.mp3 "
+            f"(local target: {os.fsdecode(self.two.path)})",
+            message,
+        )
 
     def test_playlist_export_query_and_name_filter(self):
         path = os.path.join(self.playlists, "favourites.m3u")
