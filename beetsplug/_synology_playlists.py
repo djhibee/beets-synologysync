@@ -87,15 +87,87 @@ class OwnerAliases:
                     raise ui.UserError("Owner alias namespace exhausted")
                 candidate = stem[:8 - len(suffix)] + suffix
 
-    def owner(self, alias):
-        if not re.fullmatch(r"[A-Za-z0-9-]{1,8}", alias):
+    @staticmethod
+    def _validate_alias(alias):
+        if not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,8}", alias):
             raise ui.UserError(f"Invalid playlist owner alias: {alias}")
+
+    def mappings(self):
+        with self.lib.transaction() as tx:
+            return [
+                (row["alias"], row["owner"])
+                for row in tx.query(
+                    "SELECT alias, owner FROM synologysync_owner_aliases ORDER BY alias"
+                )
+            ]
+
+    def create(self, alias, owner):
+        self._save(alias, owner, update=False)
+
+    def update(self, alias, owner):
+        self._save(alias, owner, update=True)
+
+    def _save(self, alias, owner, update):
+        self._validate_alias(alias)
+        if not isinstance(owner, str) or not owner.strip():
+            raise ui.UserError("Playlist owner must not be empty")
+        with self.lib.transaction() as tx:
+            exists = tx.query(
+                "SELECT 1 FROM synologysync_owner_aliases WHERE alias = ?", (alias,)
+            )
+            if update and not exists:
+                raise ui.UserError(f"Unknown playlist owner alias: {alias}")
+            if not update and exists:
+                raise ui.UserError(f"Playlist owner alias already exists: {alias}")
+            rows = tx.query(
+                "SELECT alias FROM synologysync_owner_aliases WHERE owner = ? AND alias != ?",
+                (owner, alias),
+            )
+            if rows:
+                raise ui.UserError(
+                    f"Playlist owner already mapped to alias: {rows[0]['alias']}"
+                )
+            if self.pretend:
+                raise ui.UserError("Cannot edit playlist owner mappings in pretend mode")
+            if update:
+                tx.mutate(
+                    "UPDATE synologysync_owner_aliases SET owner = ? WHERE alias = ?",
+                    (owner, alias),
+                )
+            else:
+                tx.mutate(
+                    "INSERT INTO synologysync_owner_aliases (alias, owner) VALUES (?, ?)",
+                    (alias, owner),
+                )
+
+    def delete(self, alias):
+        self._validate_alias(alias)
+        with self.lib.transaction() as tx:
+            if not tx.query(
+                "SELECT 1 FROM synologysync_owner_aliases WHERE alias = ?", (alias,)
+            ):
+                raise ui.UserError(f"Unknown playlist owner alias: {alias}")
+            if self.pretend:
+                raise ui.UserError("Cannot edit playlist owner mappings in pretend mode")
+            tx.mutate(
+                "DELETE FROM synologysync_owner_aliases WHERE alias = ?", (alias,)
+            )
+
+    def owner(self, alias, resolve=None):
+        self._validate_alias(alias)
         with self.lib.transaction() as tx:
             rows = tx.query(
                 "SELECT owner FROM synologysync_owner_aliases WHERE alias = ?", (alias,)
             )
         if not rows:
-            raise ui.UserError(f"Unknown playlist owner alias: {alias}; restore the beets database")
+            if resolve is None or self.pretend:
+                raise ui.UserError(
+                    f"Unknown playlist owner alias: {alias}; "
+                    f"use beet synoowner add {alias} <owner>"
+                )
+            owner = resolve(alias)
+            self.create(alias, owner)
+            return owner
         return rows[0]["owner"]
 
     def filename(self, identity):
@@ -108,17 +180,18 @@ class OwnerAliases:
             raise ui.UserError("Encoded playlist filename exceeds 255 bytes")
         return stem
 
-    def identity(self, stem):
+    def identity(self, stem, resolve_owner=None):
         if not stem.startswith(("G_", "P_")):
             return None
         parts = stem.split("_", 2)
         if len(parts) != 3:
             raise ui.UserError(f"Invalid encoded playlist filename: {stem}")
         prefix, alias, name = parts
+        name = decode_name(name)
         return (
             "shared" if prefix == "G" else "personal",
-            None if prefix == "G" and not alias else self.owner(alias),
-            decode_name(name),
+            None if prefix == "G" and not alias else self.owner(alias, resolve_owner),
+            name,
         )
 
 
