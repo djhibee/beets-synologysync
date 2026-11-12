@@ -543,6 +543,7 @@ class SynologySyncPlugin(BeetsPlugin):
         if remote_filter is None and not items:
             self._log.info("No items match the query")
             return
+        errors = []
         with self._connect(opts) as client:
             if remote_filter is not None:
                 songs = self._song_index(client, rating=remote_filter)
@@ -587,6 +588,10 @@ class SynologySyncPlugin(BeetsPlugin):
                         [local for local, _ in mapping.mappings],
                     )
                     if remote_filter is None:
+                        errors.append(
+                            "No mapped AudioStation song for {}: path does not match "
+                            "any path_mapping".format(os.fsdecode(item.path))
+                        )
                         self._log.warning(
                             "No mapped AudioStation song for {}: path does not match any path_mapping",
                             item.path,
@@ -627,6 +632,12 @@ class SynologySyncPlugin(BeetsPlugin):
                             len(songs),
                         )
                     if remote_filter is None:
+                        errors.append(
+                            "No mapped AudioStation song for {}: mapped path '{}' not "
+                            "found in AudioStation".format(
+                                os.fsdecode(item.path), syno_path
+                            )
+                        )
                         self._log.warning(
                             "No mapped AudioStation song for {}: mapped path '{}' not found in AudioStation",
                             item.path,
@@ -709,6 +720,11 @@ class SynologySyncPlugin(BeetsPlugin):
                     destination,
                     source,
                 )
+        if errors:
+            self._log.warning(
+                "Errors encountered during syncSynoRatings:\n{}",
+                "\n".join(f"  {error}" for error in errors),
+            )
 
     def _playlist_settings(self):
         self._plugin("playlist")

@@ -2363,12 +2363,20 @@ class PluginTest(unittest.TestCase):
         self.lib.add(unmapped_item)
         with patch.object(self.plugin._log, "warning") as warning:
             self.plugin.sync_ratings(self.lib, self.options(0), ["title:unmapped"])
-        warning.assert_called_once()
+        self.assertEqual(warning.call_count, 2)
         self.assertEqual(
             warning.call_args.args[0],
+            "Errors encountered during syncSynoRatings:\n{}",
+        )
+        self.assertIn(
+            "No mapped AudioStation song for " + os.fsdecode(unmapped_item.path),
+            warning.call_args.args[1],
+        )
+        self.assertEqual(
+            warning.call_args_list[0].args[0],
             "No mapped AudioStation song for {}: path does not match any path_mapping",
         )
-        self.assertEqual(warning.call_args.args[1], unmapped_item.path)
+        self.assertEqual(warning.call_args_list[0].args[1], unmapped_item.path)
 
     def test_missing_mapped_song_warning_unmatched_remote_path(self):
         self.prepare_ratings()
@@ -2378,13 +2386,35 @@ class PluginTest(unittest.TestCase):
         self.lib.add(item_three)
         with patch.object(self.plugin._log, "warning") as warning:
             self.plugin.sync_ratings(self.lib, self.options(0), ["title:three"])
-        warning.assert_called_once()
+        self.assertEqual(warning.call_count, 2)
         self.assertEqual(
-            warning.call_args.args[0],
+            warning.call_args_list[0].args[0],
             "No mapped AudioStation song for {}: mapped path '{}' not found in AudioStation",
         )
-        self.assertEqual(warning.call_args.args[1], item_three.path)
-        self.assertEqual(warning.call_args.args[2], "/music/three.mp3")
+        self.assertEqual(warning.call_args_list[0].args[1], item_three.path)
+        self.assertEqual(warning.call_args_list[0].args[2], "/music/three.mp3")
+
+    def test_sync_ratings_repeats_all_recoverable_errors_at_end(self):
+        self.prepare_ratings()
+        first = Item(
+            path=os.fsencode("/different/directory/first.mp3"), title="unmapped"
+        )
+        second = Item(
+            path=os.fsencode("/another/directory/second.mp3"), title="unmapped"
+        )
+        self.lib.add(first)
+        self.lib.add(second)
+
+        with patch.object(self.plugin._log, "warning") as warning:
+            self.plugin.sync_ratings(self.lib, self.options(0), ["title:unmapped"])
+
+        summary = warning.call_args.args[1]
+        self.assertEqual(
+            warning.call_args.args[0],
+            "Errors encountered during syncSynoRatings:\n{}",
+        )
+        self.assertIn(os.fsdecode(first.path), summary)
+        self.assertIn(os.fsdecode(second.path), summary)
 
     def test_per_song_search_logs_path_comparisons_and_similar_paths(self):
         self.prepare_ratings()
