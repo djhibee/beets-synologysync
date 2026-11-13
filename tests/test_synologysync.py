@@ -484,6 +484,7 @@ class PluginTest(unittest.TestCase):
 
     def test_startup_skips_check_when_automatic_reindexing_is_disabled(self):
         config["synologysync"]["synoindex_on_import"] = False
+        config["synologysync"]["synoindex_on_move"] = False
         with patch.object(SynologySyncPlugin, "_local_synoindex") as find, \
                 patch.object(self.plugin._log, "warning") as warning:
             SynologySyncPlugin()
@@ -638,6 +639,74 @@ class PluginTest(unittest.TestCase):
                 self.plugin.import_task_files(session=None, task=task)
         run.assert_not_called()
         self.assertEqual(len(logs.output), 1)
+
+    def test_move_updates_index_after_singleton_and_album_tracks_move(self):
+        album = self.lib.add_album([self.one, self.two])
+        singleton = Item(path=os.fsencode(os.path.join(self.music, "single.mp3")),
+                         title="single")
+        self.lib.add(singleton)
+        for item in (self.one, self.two, singleton):
+            with open(os.fsdecode(item.path), "wb"):
+                pass
+        sources = {item.id: os.fsdecode(item.path)
+                   for item in (self.one, self.two, singleton)}
+        self.lib.path_formats = [("default", "$album/$title")]
+        destination_root = os.fsencode(os.path.join(self.music, "moved"))
+        updates = []
+
+        def send(event, **kwargs):
+            if event == "item_moved":
+                self.assertTrue(os.path.isfile(kwargs["destination"]))
+                self.assertFalse(os.path.exists(kwargs["source"]))
+                self.plugin.listeners[event][0](**kwargs)
+                updates.append(kwargs)
+
+        with self._local_synoindex(), \
+                patch("beets.plugins.send", side_effect=send), \
+                patch("beetsplug.synologysync.subprocess.run",
+                      return_value=SimpleNamespace(returncode=0)) as run:
+            singleton.move(basedir=destination_root)
+            album.move(basedir=destination_root)
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(run.call_args_list, [
+            call(["/usr/syno/bin/synoindex", "-n",
+                  os.fsdecode(update["destination"]), sources[update["item"].id]],
+                 check=False)
+            for update in updates
+        ])
+
+    def test_move_disabled_unchanged_or_off_nas_does_not_fail(self):
+        source = self.one.path
+        destination = os.fsencode(os.path.join(self.music, "renamed.mp3"))
+        with patch("beetsplug.synologysync.subprocess.run") as run:
+            with patch.object(self.plugin, "_local_synoindex") as find:
+                self.plugin.item_moved(self.one, source, source)
+                self.plugin.config["synoindex_on_move"] = False
+                self.plugin.item_moved(self.one, source, destination)
+            find.assert_not_called()
+            self.plugin.config["synoindex_on_move"] = True
+            with patch.object(self.plugin, "_local_synoindex",
+                              side_effect=ui.UserError("synoindex not found")), \
+                    self.assertLogs("beets.synologysync", level="WARNING") as logs:
+                self.plugin.item_moved(self.one, source, destination)
+                self.plugin.item_moved(self.one, source, destination)
+            self.assertEqual(len(logs.output), 1)
+        run.assert_not_called()
+
+    def test_move_index_failures_are_logged_without_aborting(self):
+        source = os.path.join(self.music, "old {song}; $(name).mp3")
+        destination = os.path.join(self.music, "new {song}; $(name).mp3")
+        with self._local_synoindex(), \
+                patch("beetsplug.synologysync.subprocess.run",
+                      side_effect=[SimpleNamespace(returncode=1), OSError("boom")]) as run, \
+                self.assertLogs("beets.synologysync", level="WARNING") as logs:
+            self.plugin.item_moved(self.one, source, destination)
+            self.plugin.item_moved(self.one, source, destination)
+        self.assertEqual(run.call_args_list, [
+            call(["/usr/syno/bin/synoindex", "-n", destination, source], check=False)
+        ] * 2)
+        self.assertIn("exit status 1", logs.output[0])
+        self.assertIn("boom", logs.output[1])
 
     def test_username_fallback_precedence(self):
         opts = self.options()

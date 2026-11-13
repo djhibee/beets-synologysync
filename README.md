@@ -23,13 +23,15 @@ Media indexing additionally requires DSM's executable `synoindex`, found on
 (the default), the plugin checks this dependency when Beets loads it and logs
 a non-blocking warning if it is missing or not executable. Ratings and playlist
 synchronization remain available. This is a runtime check, not a `pip` install
-hook; set `synologysync.synoindex_on_import: no` to disable automatic indexing
+hook; set both `synologysync.synoindex_on_import: no` and
+`synologysync.synoindex_on_move: no` to disable automatic indexing
 and its dependency warning.
 
 For Beets running in Docker or outside the NAS, consider
 `simple-synoindex-server` on the NAS to wrap `synoindex` through an API.
 This plugin has no built-in client for that API: provide a separate executable
-wrapper named `synoindex` on Beets' `PATH` that accepts `-R <directory>`,
+wrapper named `synoindex` on Beets' `PATH` that accepts `-R <directory>` and
+`-n <new_filepath> <old_filepath>`,
 calls the server, and returns a nonzero exit status on failure. The wrapper must
 translate container paths to NAS paths if they differ; `path_mapping` is not
 applied to indexing. Installing the server alone does not enable remote indexing.
@@ -54,6 +56,7 @@ synologysync:
   # SingleAPICallThreshold: 100
   # ca_file: /home/alice/nas-ca.pem
   # synoindex_on_import: yes  # reindex imported directories (NAS only)
+  # synoindex_on_move: yes    # update the index after file moves (NAS only)
 
 playlist:
   playlist_dir: /home/alice/Playlists
@@ -380,7 +383,22 @@ the directory containing the song. Failures are logged and never abort the
 import. When `synoindex` is not available, a single warning is logged at plugin
 startup (or at import time if it becomes unavailable later), and imports continue
 without re-indexing; set
-`synoindex_on_import: no` to silence it.
+both `synoindex_on_import: no` and `synoindex_on_move: no` to silence it.
+
+### Automatic index updates on move
+
+When `synoindex_on_move` is enabled (the default), each successful file move
+triggers `synoindex -n <new_filepath> <old_filepath>` via beets' `item_moved`
+event. This covers individual items, album moves, and moves caused by metadata
+changes. Beets moves albums track by track, not by renaming a whole directory,
+so album moves also use `-n` per track rather than `-N`. Copies and links do not
+trigger rename updates, and a pretend move makes no index changes.
+
+Paths are passed unchanged, with no `path_mapping` or AudioStation login.
+Failures are logged without aborting the move; a missing executable warns only
+once per plugin instance, shared with the import hook. Set
+`synoindex_on_move: no` to disable move notifications independently of import
+re-indexing.
 
 ## Tests
 

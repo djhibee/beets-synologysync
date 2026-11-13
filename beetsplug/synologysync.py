@@ -98,11 +98,15 @@ class SynologySyncPlugin(BeetsPlugin):
                 "playlist_library": "personal",
                 "SingleAPICallThreshold": 100,
                 "synoindex_on_import": True,
+                "synoindex_on_move": True,
             }
         )
-        self._import_synoindex_warned = False
+        self._synoindex_warned = False
         self.register_listener("import_task_files", self.import_task_files)
-        self._import_synoindex_binary()
+        self.register_listener("item_moved", self.item_moved)
+        self._automatic_synoindex_binary(
+            "import" if self.config["synoindex_on_import"].get(bool) else "move"
+        )
         self._log.debug(
             "Initialized synologysync plugin in {:.3f}s", perf_counter() - started
         )
@@ -377,42 +381,49 @@ class SynologySyncPlugin(BeetsPlugin):
             "must be provided separately (no built-in API client)"
         )
 
-    def _run_synoindex(self, binary, directory):
-        self._log.info("Reindexing {}", directory)
+    def _run_synoindex(self, binary, path, source=None):
+        if source is None:
+            self._log.info("Reindexing {}", path)
+            command = [binary, "-R", path]
+        else:
+            self._log.info("Updating Synology index: {} -> {}", source, path)
+            command = [binary, "-n", path, source]
         try:
-            result = subprocess.run([binary, "-R", directory], check=False)
+            result = subprocess.run(command, check=False)
         except OSError as exc:
-            self._log.warning("Unable to run synoindex for {}: {}", directory, exc)
+            self._log.warning("Unable to run synoindex for {}: {}", path, exc)
             return False
         if result.returncode != 0:
             self._log.warning(
                 "synoindex failed for {} (exit status {})",
-                directory,
+                path,
                 result.returncode,
             )
             return False
         return True
 
-    def _import_synoindex_binary(self):
-        if not self.config["synoindex_on_import"].get(bool):
-            self._log.debug("Skipping synoindex lookup: synoindex_on_import is disabled")
+    def _automatic_synoindex_binary(self, action):
+        if not self.config[f"synoindex_on_{action}"].get(bool):
+            self._log.debug("Skipping synoindex lookup: synoindex_on_{} is disabled", action)
             return None
         try:
             return self._local_synoindex()
         except ui.UserError as exc:
-            if not self._import_synoindex_warned:
-                self._import_synoindex_warned = True
+            if not self._synoindex_warned:
+                self._synoindex_warned = True
                 self._log.warning(
-                    "{}; skipping reindex after import. "
-                    "Set synologysync.synoindex_on_import: no to disable automatic "
+                    "{}; skipping index updates after {}. "
+                    "Set synologysync.synoindex_on_import: no and "
+                    "synologysync.synoindex_on_move: no to disable automatic "
                     "reindexing and silence this warning",
                     exc,
+                    action,
                 )
             return None
 
     def import_task_files(self, session, task):
         """Reindex the final directories of an album or singleton after import."""
-        binary = self._import_synoindex_binary()
+        binary = self._automatic_synoindex_binary("import")
         if binary is None:
             return
         directories = _unique(
@@ -424,6 +435,16 @@ class SynologySyncPlugin(BeetsPlugin):
                 self._run_synoindex(binary, directory)
             else:
                 self._log.warning("Directory not found: {}; skipping", directory)
+
+    def item_moved(self, item, source, destination):
+        """Update the index after a successful move, including album tracks."""
+        source = os.fsdecode(source)
+        destination = os.fsdecode(destination)
+        if source == destination:
+            return
+        binary = self._automatic_synoindex_binary("move")
+        if binary is not None:
+            self._run_synoindex(binary, destination, source=source)
 
     def synoindex(self, lib, opts, args):
         binary = self._local_synoindex()
