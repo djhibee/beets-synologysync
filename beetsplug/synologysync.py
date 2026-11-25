@@ -858,7 +858,15 @@ class SynologySyncPlugin(BeetsPlugin):
         directory, base = self._playlist_settings()
         mapping = self._mapping()
         local = self._local_playlists(directory)
-        items = list(lib.items(ui.decargs(args)))
+        items = []
+        if args or opts.dest == "syno":
+            with self._debug_stage("playlist beets item query and loading"):
+                items = list(lib.items(ui.decargs(args)))
+            self._log.debug("Loaded {} matching beets items", len(items))
+        else:
+            self._log.debug(
+                "Deferring beets item loading to selected AudioStation playlist paths"
+            )
         selected = {os.path.abspath(os.fsdecode(item.path)): item for item in items}
         if args and not selected:
             self._log.info("No items match the query")
@@ -934,7 +942,7 @@ class SynologySyncPlugin(BeetsPlugin):
                     canonical_local[stem] = path
                 self._playlists_to_beets(
                     client, opts, mapping, items, resolved, canonical_local,
-                    directory, base, bool(args),
+                    directory, base, bool(args), lib,
                 )
             else:
                 targets = {}
@@ -996,7 +1004,7 @@ class SynologySyncPlugin(BeetsPlugin):
                     bool(args), username,
                 )
 
-    def _playlists_to_beets(self, client, opts, mapping, items, remote, local, directory, base, queried):
+    def _playlists_to_beets(self, client, opts, mapping, items, remote, local, directory, base, queried, lib):
         paths = {}
         for item in items:
             remote_path = mapping.to_syno(item.path)
@@ -1008,7 +1016,33 @@ class SynologySyncPlugin(BeetsPlugin):
             if name in local and opts.conflict == "skip":
                 continue
             entries = []
-            for song in client.playlist_songs(playlist["id"]):
+            with self._debug_stage(f"AudioStation playlist songs: {name}"):
+                songs = list(client.playlist_songs(playlist["id"]))
+            if not queried:
+                with self._debug_stage(f"beets path lookup for playlist: {name}"):
+                    for remote_path in dict.fromkeys(song_path(song) for song in songs):
+                        if remote_path in paths:
+                            continue
+                        matches = []
+                        for local_path in mapping.to_local(remote_path):
+                            path_query = PathQuery("path", os.fsencode(local_path))
+                            lookup = (
+                                MatchQuery("path", path_query.pattern)
+                                if path_query.case_sensitive else path_query
+                            )
+                            matches.extend(
+                                os.path.abspath(os.fsdecode(item.path))
+                                for item in lib.items(lookup)
+                                if mapping.to_syno(item.path) == remote_path
+                            )
+                        if len(matches) > 1:
+                            raise ui.UserError(f"Ambiguous mapped beets path: {remote_path}")
+                        paths[remote_path] = matches[0] if matches else None
+                self._log.debug(
+                    "Checked {} AudioStation song entries for playlist {}",
+                    len(songs), name,
+                )
+            for song in songs:
                 path = paths.get(song_path(song))
                 if path:
                     entries.append(path)

@@ -783,6 +783,75 @@ class PluginTest(unittest.TestCase):
         self.client.close.assert_called_once()
         self.password.assert_called_once()
 
+    def test_playlist_import_only_loads_selected_song_paths(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(name="Other", playlist_id="other")
+        )
+        self.client.playlist_songs.return_value = [
+            self.client.songs.return_value[0],
+            self.client.songs.return_value[0],
+            {"id": "missing", "path": "/music/missing.mp3"},
+        ]
+        self.lib.add(Item(path=os.fsencode(os.path.join(self.music, "unrelated.mp3"))))
+        original_items = self.lib.items
+        loaded = []
+
+        def targeted_items(query):
+            self.assertNotIsInstance(query, (list, tuple, str))
+            self.assertTrue(query.fast)
+            items = list(original_items(query))
+            loaded.extend(item.id for item in items)
+            return items
+
+        with patch.object(self.lib, "items", side_effect=targeted_items) as lookup:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("-p", "P_alice_favourites")), []
+            )
+        self.assertEqual(loaded, [self.one.id])
+        self.assertEqual(lookup.call_count, 2)
+        self.client.playlist_songs.assert_called_once_with("p1")
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
+        self.assertEqual(
+            self.plugin._read_playlist(path, self.playlists),
+            [os.fsdecode(self.one.path), os.fsdecode(self.one.path)],
+        )
+
+    def test_playlist_import_caches_paths_across_playlists(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(name="Other", playlist_id="other")
+        )
+        with patch.object(self.lib, "items", wraps=self.lib.items) as lookup:
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(lookup.call_count, 2)
+        self.assertEqual(self.client.playlist_songs.call_count, 2)
+
+    def test_playlist_import_relative_database_paths(self):
+        lib = Library(os.path.join(self.root, "relative.db"), directory=self.music)
+        self.addCleanup(lib._close)
+        lib.add(Item(path=self.one.path, title="one"))
+        self.plugin.sync_playlists(lib, self.options(), [])
+        path = os.path.join(self.playlists, "P_alice_favourites.m3u")
+        self.assertEqual(self.plugin._read_playlist(path, self.playlists), [os.fsdecode(self.one.path)])
+
+    def test_playlist_import_rejects_multiple_reverse_mapped_matches(self):
+        mirror = os.path.join(self.music, "mirror")
+        self.plugin.config["path_mapping"] = [
+            {"local": self.music, "syno": "/music"},
+            {"local": mirror, "syno": "/music"},
+        ]
+        self.lib.add(Item(path=os.fsencode(os.path.join(mirror, "one.mp3"))))
+        with self.assertRaisesRegex(ui.UserError, "Ambiguous mapped beets path"):
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+
+    def test_playlist_import_without_matching_playlist_does_not_load_items(self):
+        with patch.object(self.lib, "items") as lookup:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("-p", "missing")), []
+            )
+        lookup.assert_not_called()
+        self.client.playlist_songs.assert_not_called()
+
     def test_playlist_import_logs_songs_to_beets_at_debug(self):
         with self.assertLogs("beets.synologysync", level="DEBUG") as logs:
             self.plugin.sync_playlists(self.lib, self.options(), ["title:one"])
