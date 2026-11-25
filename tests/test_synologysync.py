@@ -816,6 +816,68 @@ class PluginTest(unittest.TestCase):
             [os.fsdecode(self.one.path), os.fsdecode(self.one.path)],
         )
 
+    def test_playlist_export_without_selection_only_loads_local_playlist_paths(self):
+        self.local_playlist("first", [
+            os.fsdecode(self.one.path), os.fsdecode(self.one.path),
+            os.path.join(self.music, "missing.mp3"),
+        ])
+        self.local_playlist("second", [os.fsdecode(self.two.path), os.fsdecode(self.one.path)])
+        self.lib.add(Item(path=os.fsencode(os.path.join(self.music, "unrelated.mp3"))))
+        loaded = []
+        original_items = self.lib.items
+
+        def targeted_items(query):
+            self.assertNotIsInstance(query, (list, tuple, str))
+            self.assertTrue(query.fast)
+            items = list(original_items(query))
+            loaded.extend(item.id for item in items)
+            return items
+
+        with patch.object(self.lib, "items", side_effect=targeted_items) as lookup:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "--force")), []
+            )
+        self.assertEqual(loaded, [self.one.id, self.two.id])
+        self.assertEqual(lookup.call_count, 3)
+        self.client.save_playlist.assert_any_call(
+            "first", ["1", "1"], None, library="personal"
+        )
+        self.client.save_playlist.assert_any_call(
+            "second", ["2", "1"], None, library="personal"
+        )
+
+    def test_playlist_export_selected_playlist_does_not_load_other_paths(self):
+        self.local_playlist("first", [os.fsdecode(self.one.path)])
+        self.local_playlist("second", [os.fsdecode(self.two.path)])
+        with patch.object(self.lib, "items", wraps=self.lib.items) as lookup:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno", "-p", "first")), []
+            )
+        self.assertEqual(lookup.call_count, 1)
+        self.client.save_playlist.assert_called_once_with(
+            "first", ["1"], None, library="personal"
+        )
+
+    def test_playlist_export_no_local_playlists_does_not_load_items(self):
+        with patch.object(self.lib, "items") as lookup:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("--dest=syno",)), []
+            )
+        lookup.assert_not_called()
+        self.client.save_playlist.assert_not_called()
+
+    def test_playlist_export_relative_database_paths(self):
+        lib = Library(os.path.join(self.root, "relative.db"), directory=self.music)
+        self.addCleanup(lib._close)
+        lib.add(Item(path=self.one.path, title="one"))
+        self.local_playlist("first", [os.fsdecode(self.one.path)])
+        self.plugin.sync_playlists(
+            lib, self.options(arguments=("--dest=syno", "-p", "first")), []
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "first", ["1"], None, library="personal"
+        )
+
     def test_playlist_import_caches_paths_across_playlists(self):
         self.client.playlists.return_value.append(
             self.remote_playlist(name="Other", playlist_id="other")

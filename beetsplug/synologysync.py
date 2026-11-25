@@ -860,13 +860,13 @@ class SynologySyncPlugin(BeetsPlugin):
         with self._debug_stage("local playlist filename validation"):
             local = self._local_playlists(directory)
         items = []
-        if args or opts.dest == "syno":
+        if args:
             with self._debug_stage("playlist beets item query and loading"):
                 items = list(lib.items(ui.decargs(args)))
             self._log.debug("Loaded {} matching beets items", len(items))
         else:
             self._log.debug(
-                "Deferring beets item loading to selected AudioStation playlist paths"
+                "Deferring beets item loading to selected playlist paths"
             )
         selected = {os.path.abspath(os.fsdecode(item.path)): item for item in items}
         if args and not selected:
@@ -1003,8 +1003,17 @@ class SynologySyncPlugin(BeetsPlugin):
                     raise ui.UserError("Ambiguous playlist selection; use the exact generated stem")
                 self._playlists_to_syno(
                     client, opts, mapping, selected, targets, base,
-                    bool(args), username,
+                    bool(args), username, lib,
                 )
+
+    @staticmethod
+    def _items_at_path(lib, path):
+        path_query = PathQuery("path", os.fsencode(path))
+        lookup = (
+            MatchQuery("path", path_query.pattern)
+            if path_query.case_sensitive else path_query
+        )
+        return lib.items(lookup)
 
     def _playlists_to_beets(self, client, opts, mapping, items, remote, local, directory, base, queried, lib):
         paths = {}
@@ -1027,14 +1036,9 @@ class SynologySyncPlugin(BeetsPlugin):
                             continue
                         matches = []
                         for local_path in mapping.to_local(remote_path):
-                            path_query = PathQuery("path", os.fsencode(local_path))
-                            lookup = (
-                                MatchQuery("path", path_query.pattern)
-                                if path_query.case_sensitive else path_query
-                            )
                             matches.extend(
                                 os.path.abspath(os.fsdecode(item.path))
-                                for item in lib.items(lookup)
+                                for item in self._items_at_path(lib, local_path)
                                 if mapping.to_syno(item.path) == remote_path
                             )
                         if len(matches) > 1:
@@ -1079,7 +1083,7 @@ class SynologySyncPlugin(BeetsPlugin):
             self._log.info("Synced playlist to beets: {}", name)
 
     def _playlists_to_syno(
-        self, client, opts, mapping, selected, targets, base, queried, username
+        self, client, opts, mapping, selected, targets, base, queried, username, lib
     ):
         # AudioStation cannot look songs up by path: a few entries are resolved
         # through Song search, larger exports through a single global index
@@ -1087,6 +1091,7 @@ class SynologySyncPlugin(BeetsPlugin):
         threshold = self._single_api_call_threshold()
         songs = None
         found = {}
+        checked_paths = set()
         searched = 0
         for (library, owner, name), (stem, path, existing) in targets.items():
             if existing and is_smart(existing):
@@ -1094,7 +1099,17 @@ class SynologySyncPlugin(BeetsPlugin):
                 continue
             if existing and opts.conflict == "skip":
                 continue
-            entries = [entry for entry in self._read_playlist(path, base) if entry in selected]
+            source_entries = self._read_playlist(path, base)
+            if not queried:
+                with self._debug_stage(f"beets path lookup for local playlist: {stem}"):
+                    for entry in dict.fromkeys(source_entries):
+                        if entry in checked_paths:
+                            continue
+                        checked_paths.add(entry)
+                        for item in self._items_at_path(lib, entry):
+                            if os.path.abspath(os.fsdecode(item.path)) == entry:
+                                selected[entry] = item
+            entries = [entry for entry in source_entries if entry in selected]
             if not entries and queried:
                 continue
             if not existing and owner is None:
