@@ -52,6 +52,7 @@ synologysync:
   force: "no"        # no | rating | playlist | yes
   library: all      # all | personal | shared: playlist selection
   playlist_library: personal  # personal | shared: new unprefixed playlists
+  # default_playlist_owner: alice  # fallback when an imported shared owner is unknown
   timeout: 30
   # SingleAPICallThreshold: 100
   # ca_file: /home/alice/nas-ca.pem
@@ -262,9 +263,22 @@ validated against the saved map, even across category selections. A lost or
 incomplete alias table therefore cannot silently reassign an old filename to a
 new owner with the same shortened alias; missing mappings must be restored
 manually or through the prompt before importing.
-When a shared playlist's owner is unavailable in the API, its explicit filename
-is `G__<original name>.m3u`: the empty alias means **unknown owner**, not the login
-user, and does not create an alias-table entry.
+When a selected shared playlist's owner is unavailable in the API, import uses
+`synologysync.default_playlist_owner` if it is nonempty; otherwise it prompts
+for the full AudioStation owner username (empty input cancels). The supplied
+owner is saved through the usual alias mapping, producing
+`G_<owner alias>_<original name>.m3u`. Known API owners are never overridden;
+personal playlists without an explicit owner still use the effective login.
+This assigns a local identity only: it does not change ownership on AudioStation.
+Without a configured default, `--pretend` reports that the owner must be supplied
+instead of prompting. With a default, the preview uses it without saving aliases
+or files. Unselected and smart playlists never trigger an owner prompt.
+
+Legacy `G__<original name>.m3u` files remain supported: the empty alias means
+**unknown owner**, not the login user. They are not renamed or deleted when
+reimporting with an explicit owner; check and move/remove obsolete files manually.
+Export safeguards are unchanged: a locally supplied owner is not proof of the
+owner of an existing AudioStation playlist whose API owner is still unavailable.
 
 Manage the mappings locally, without connecting to AudioStation:
 

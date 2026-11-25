@@ -97,6 +97,7 @@ class SynologySyncPlugin(BeetsPlugin):
                 "timeout": 30,
                 "library": "all",
                 "playlist_library": "personal",
+                "default_playlist_owner": "",
                 "SingleAPICallThreshold": 100,
                 "synoindex_on_import": True,
                 "synoindex_on_move": True,
@@ -881,11 +882,16 @@ class SynologySyncPlugin(BeetsPlugin):
                     raise ui.UserError(f"Ambiguous AudioStation playlist identity: {identity}")
                 remote[identity] = playlist
             if opts.dest == "beet":
+                default_owner = self.config["default_playlist_owner"].get(str).strip()
                 imported = {}
                 for identity, playlist in remote.items():
                     if is_smart(playlist):
                         continue
+                    if identity[1] is None and default_owner:
+                        identity = identity[0], default_owner, identity[2]
                     stem = aliases.filename(identity)
+                    if stem in imported:
+                        raise ui.UserError(f"Ambiguous AudioStation playlist identity: {identity}")
                     imported[stem] = playlist
                 selection = opts.playlist
                 if selection in local and selection.startswith(("G_", "P_")):
@@ -898,6 +904,28 @@ class SynologySyncPlugin(BeetsPlugin):
                         stem == selection if exact else playlist["name"] == selection
                     )
                 }
+                resolved = {}
+                for stem, playlist in imported.items():
+                    identity = playlist_identity(playlist, username)
+                    if identity[1] is None:
+                        owner = default_owner
+                        if not owner:
+                            if opts.pretend:
+                                raise ui.UserError(
+                                    f"Cannot resolve unavailable owner in pretend mode: {stem}; "
+                                    "set synologysync.default_playlist_owner or import "
+                                    "without --pretend to answer the owner prompt"
+                                )
+                            owner = self._prompt_playlist_owner(stem).strip()
+                        identity = identity[0], owner, identity[2]
+                        if identity in remote:
+                            raise ui.UserError(
+                                f"Ambiguous AudioStation playlist identity: {identity}"
+                            )
+                        stem = aliases.filename(identity)
+                    if stem in resolved:
+                        raise ui.UserError(f"Ambiguous AudioStation playlist identity: {identity}")
+                    resolved[stem] = playlist
                 canonical_local = {}
                 for stem, path in local.items():
                     if stem.startswith(("G_", "P_")):
@@ -905,7 +933,7 @@ class SynologySyncPlugin(BeetsPlugin):
                         stem = f"{prefix}_{alias}_{encode_name(decode_name(encoded))}"
                     canonical_local[stem] = path
                 self._playlists_to_beets(
-                    client, opts, mapping, items, imported, canonical_local,
+                    client, opts, mapping, items, resolved, canonical_local,
                     directory, base, bool(args),
                 )
             else:

@@ -1738,12 +1738,13 @@ class PluginTest(unittest.TestCase):
         self.plugin.sync_playlists(self.lib, self.options(arguments=("--synouser=bob",)), [])
         self.assertEqual(os.listdir(self.playlists), ["P_bob_favourites.m3u"])
 
-    def test_missing_shared_owner_roundtrips_without_guessing_connected_user(self):
+    def test_legacy_ownerless_shared_export_does_not_guess_connected_user(self):
         self.client.playlists.return_value = [
             self.remote_playlist(owner="", library="shared", playlist_id="g1")
         ]
-        self.plugin.sync_playlists(self.lib, self.options(), [])
-        self.assertEqual(os.listdir(self.playlists), ["G__favourites.m3u"])
+        self.local_playlist("G__favourites", [
+            os.fsdecode(self.one.path), os.fsdecode(self.two.path),
+        ])
         aliases = OwnerAliases(self.lib)
         self.assertEqual(aliases.identity("G__favourites"),
                          ("shared", None, "favourites"))
@@ -1921,16 +1922,125 @@ class PluginTest(unittest.TestCase):
         self.client.playlists.return_value = [
             self.remote_playlist(owner="", library="shared", playlist_id="g1", name=name)
         ]
+        self.plugin.config["default_playlist_owner"] = "bob"
         self.plugin.sync_playlists(self.lib, self.options(), [])
         stem = os.path.splitext(os.listdir(self.playlists)[0])[0]
-        self.assertEqual(stem, "G__%47_under_scores%2F100%25")
-        self.assertEqual(OwnerAliases(self.lib).identity(stem), ("shared", None, name))
-        self.plugin.sync_playlists(
-            self.lib, self.options(arguments=("--dest=syno", "--force", "-p", stem)), []
+        self.assertEqual(stem, "G_bob_%47_under_scores%2F100%25")
+        self.assertEqual(OwnerAliases(self.lib).identity(stem), ("shared", "bob", name))
+
+    def test_import_missing_owner_prompts_and_stores_owner_alias(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", name="Calme", playlist_id="g1")
+        ]
+        with patch("beetsplug.synologysync.ui.input_", return_value=" bob ") as prompt:
+            self.plugin.sync_playlists(self.lib, self.options(arguments=("-p", "Calme")), [])
+        prompt.assert_called_once()
+        self.assertEqual(os.listdir(self.playlists), ["G_bob_Calme.m3u"])
+        self.assertEqual(OwnerAliases(self.lib).owner("bob"), "bob")
+        self.client.playlist_songs.assert_called_once_with("g1")
+        self.client.save_playlist.assert_not_called()
+
+    def test_import_default_owner_only_replaces_missing_owner(self):
+        self.plugin.config["default_playlist_owner"] = " bob "
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", name="Calme", playlist_id="g1"),
+            self.remote_playlist(owner="carol", library="shared", name="Other", playlist_id="g2"),
+            self.remote_playlist(owner="", library="personal", name="Personal", playlist_id="p1"),
+        ]
+        with patch("beetsplug.synologysync.ui.input_") as prompt:
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        prompt.assert_not_called()
+        self.assertEqual(set(os.listdir(self.playlists)), {
+            "G_bob_Calme.m3u", "G_carol_Other.m3u", "P_alice_Personal.m3u",
+        })
+
+    def test_import_default_owner_supports_exact_generated_stem(self):
+        self.plugin.config["default_playlist_owner"] = "bob"
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", name="Calme", playlist_id="g1"),
+            self.remote_playlist(owner="", library="shared", name="Other", playlist_id="g2"),
+        ]
+        with patch("beetsplug.synologysync.ui.input_") as prompt:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("-p", "G_bob_Calme")), []
+            )
+        prompt.assert_not_called()
+        self.assertEqual(os.listdir(self.playlists), ["G_bob_Calme.m3u"])
+        self.client.playlist_songs.assert_called_once_with("g1")
+
+    def test_import_prompts_separately_for_each_unknown_owner(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", name="Calme", playlist_id="g1"),
+            self.remote_playlist(owner="", library="shared", name="Other", playlist_id="g2"),
+        ]
+        with patch("beetsplug.synologysync.ui.input_", side_effect=["bob", "carol"]) as prompt:
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(prompt.call_count, 2)
+        self.assertEqual(set(os.listdir(self.playlists)), {"G_bob_Calme.m3u", "G_carol_Other.m3u"})
+
+    def test_import_missing_owner_empty_response_cancels(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared")
+        ]
+        self.plugin.config["default_playlist_owner"] = "   "
+        with patch("beetsplug.synologysync.ui.input_", return_value=" "), \
+                self.assertRaisesRegex(ui.UserError, "cancelled"):
+            self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), [])
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+        self.client.playlist_songs.assert_not_called()
+
+    def test_import_missing_owner_pretend_requires_config_without_prompting(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared")
+        ]
+        with patch("beetsplug.synologysync.ui.input_") as prompt, \
+                self.assertRaisesRegex(ui.UserError, "synologysync.default_playlist_owner"):
+            self.plugin.sync_playlists(self.lib, self.options(arguments=("--pretend",)), [])
+        prompt.assert_not_called()
+        self.assertEqual(os.listdir(self.playlists), [])
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+
+    def test_import_default_owner_pretend_does_not_persist_alias(self):
+        self.plugin.config["default_playlist_owner"] = "bob"
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared")
+        ]
+        with patch("beetsplug.synologysync.ui.input_") as prompt, \
+                patch.object(self.plugin._log, "info") as info:
+            self.plugin.sync_playlists(self.lib, self.options(arguments=("--pretend",)), [])
+        prompt.assert_not_called()
+        self.assertEqual(os.listdir(self.playlists), [])
+        self.assertEqual(OwnerAliases(self.lib).mappings(), [])
+        info.assert_any_call(
+            "Would sync playlist to beets ({}): {} ({} songs)",
+            "create", "G_bob_favourites", 2,
         )
-        self.client.save_playlist.assert_called_once_with(
-            name, ["1", "2"], "g1", library="shared"
+
+    def test_import_does_not_prompt_for_unselected_ownerless_playlist(self):
+        self.client.playlists.return_value.append(
+            self.remote_playlist(owner="", library="shared", name="Other", playlist_id="g1")
         )
+        with patch("beetsplug.synologysync.ui.input_") as prompt:
+            self.plugin.sync_playlists(
+                self.lib, self.options(arguments=("-p", "favourites")), []
+            )
+        prompt.assert_not_called()
+        self.client.playlist_songs.assert_called_once_with("p1")
+
+    def test_import_resolved_owner_collision_never_overwrites(self):
+        self.client.playlists.return_value = [
+            self.remote_playlist(owner="", library="shared", playlist_id="g1"),
+            self.remote_playlist(owner="bob", library="shared", playlist_id="g2"),
+        ]
+        for owner in ("", "bob"):
+            with self.subTest(default_owner=owner):
+                self.plugin.config["default_playlist_owner"] = owner
+                with patch("beetsplug.synologysync.ui.input_", return_value="bob"), \
+                        self.assertRaisesRegex(ui.UserError, "Ambiguous"):
+                    self.plugin.sync_playlists(self.lib, self.options(), [])
+                self.assertEqual(os.listdir(self.playlists), [])
+                self.client.playlist_songs.assert_not_called()
 
     def test_category_id_and_additional_owner_metadata(self):
         self.client.playlists.return_value = [
