@@ -860,7 +860,8 @@ class SynologySyncPlugin(BeetsPlugin):
         with self._debug_stage("local playlist filename validation"):
             local = self._local_playlists(directory)
         items = []
-        if args:
+        targeted = bool(opts.playlist) and not args
+        if not targeted:
             with self._debug_stage("playlist beets item query and loading"):
                 items = list(lib.items(ui.decargs(args)))
             self._log.debug("Loaded {} matching beets items", len(items))
@@ -944,7 +945,7 @@ class SynologySyncPlugin(BeetsPlugin):
                     canonical_local[stem] = path
                 self._playlists_to_beets(
                     client, opts, mapping, items, resolved, canonical_local,
-                    directory, base, bool(args), lib,
+                    directory, base, bool(args), lib, targeted,
                 )
             else:
                 targets = {}
@@ -1003,7 +1004,7 @@ class SynologySyncPlugin(BeetsPlugin):
                     raise ui.UserError("Ambiguous playlist selection; use the exact generated stem")
                 self._playlists_to_syno(
                     client, opts, mapping, selected, targets, base,
-                    bool(args), username, lib,
+                    bool(args), username, lib, targeted,
                 )
 
     @staticmethod
@@ -1015,7 +1016,10 @@ class SynologySyncPlugin(BeetsPlugin):
         )
         return lib.items(lookup)
 
-    def _playlists_to_beets(self, client, opts, mapping, items, remote, local, directory, base, queried, lib):
+    def _playlists_to_beets(
+        self, client, opts, mapping, items, remote, local, directory, base,
+        queried, lib, targeted,
+    ):
         paths = {}
         for item in items:
             remote_path = mapping.to_syno(item.path)
@@ -1029,7 +1033,7 @@ class SynologySyncPlugin(BeetsPlugin):
             entries = []
             with self._debug_stage(f"AudioStation playlist songs: {name}"):
                 songs = list(client.playlist_songs(playlist["id"]))
-            if not queried:
+            if targeted:
                 with self._debug_stage(f"beets path lookup for playlist: {name}"):
                     for remote_path in dict.fromkeys(song_path(song) for song in songs):
                         if remote_path in paths:
@@ -1083,7 +1087,8 @@ class SynologySyncPlugin(BeetsPlugin):
             self._log.info("Synced playlist to beets: {}", name)
 
     def _playlists_to_syno(
-        self, client, opts, mapping, selected, targets, base, queried, username, lib
+        self, client, opts, mapping, selected, targets, base, queried, username,
+        lib, targeted,
     ):
         # AudioStation cannot look songs up by path: a few entries are resolved
         # through Song search, larger exports through a single global index
@@ -1100,7 +1105,7 @@ class SynologySyncPlugin(BeetsPlugin):
             if existing and opts.conflict == "skip":
                 continue
             source_entries = self._read_playlist(path, base)
-            if not queried:
+            if targeted:
                 with self._debug_stage(f"beets path lookup for local playlist: {stem}"):
                     for entry in dict.fromkeys(source_entries):
                         if entry in checked_paths:

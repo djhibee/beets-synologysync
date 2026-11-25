@@ -231,18 +231,15 @@ different playlist.
 
 Imports only request the playlist list and the songs of the selected playlists
 (`Playlist getinfo`); the AudioStation song library is never listed.
-Without a positional beets item query, imports look up only the mapped paths of
-the selected playlists' songs instead of loading the entire beets library.
-Repeated paths are cached for the duration of the command. With a positional
-query, only its matching items are eligible, as before. Debug logs (`-vvv`)
-report timings for playlist-song fetching and local path lookups.
+With `-p` and no positional beets item query, imports and exports look up only
+the selected playlists' song paths; repeated paths are cached for the duration
+of the command. Without `-p`, both directions load the entire beets library.
+A positional beets query instead loads only its matching items, with or without
+`-p`. Debug logs (`-vvv`) report timings for item loading, playlist-song
+fetching and local path lookups.
 Before the password prompt, they also time local filename validation and owner
 alias loading/validation.
 
-Exports also avoid loading the entire beets library when no positional query is supplied:
-only paths listed in the selected local playlists are looked up, with a
-per-command cache. Without `-p`, this covers the playlists directly in
-`playlist_dir` (subject to `--library`); with `-p`, only its selection is used.
 Exports must resolve local files to AudioStation song IDs, which the API cannot look up
 by path. While fewer than `SingleAPICallThreshold` (default `100`) distinct
 songs need resolving, each one is looked up with Song search (title, then album,

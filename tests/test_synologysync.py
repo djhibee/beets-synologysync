@@ -816,29 +816,29 @@ class PluginTest(unittest.TestCase):
             [os.fsdecode(self.one.path), os.fsdecode(self.one.path)],
         )
 
-    def test_playlist_export_without_selection_only_loads_local_playlist_paths(self):
+    def test_playlist_export_without_selection_loads_full_library(self):
         self.local_playlist("first", [
             os.fsdecode(self.one.path), os.fsdecode(self.one.path),
             os.path.join(self.music, "missing.mp3"),
         ])
         self.local_playlist("second", [os.fsdecode(self.two.path), os.fsdecode(self.one.path)])
-        self.lib.add(Item(path=os.fsencode(os.path.join(self.music, "unrelated.mp3"))))
+        unrelated = Item(path=os.fsencode(os.path.join(self.music, "unrelated.mp3")))
+        self.lib.add(unrelated)
         loaded = []
         original_items = self.lib.items
 
-        def targeted_items(query):
-            self.assertNotIsInstance(query, (list, tuple, str))
-            self.assertTrue(query.fast)
+        def all_items(query):
+            self.assertEqual(query, [])
             items = list(original_items(query))
             loaded.extend(item.id for item in items)
             return items
 
-        with patch.object(self.lib, "items", side_effect=targeted_items) as lookup:
+        with patch.object(self.lib, "items", side_effect=all_items) as lookup:
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno", "--force")), []
             )
-        self.assertEqual(loaded, [self.one.id, self.two.id])
-        self.assertEqual(lookup.call_count, 3)
+        self.assertCountEqual(loaded, [self.one.id, self.two.id, unrelated.id])
+        self.assertEqual(lookup.call_count, 1)
         self.client.save_playlist.assert_any_call(
             "first", ["1", "1"], None, library="personal"
         )
@@ -858,12 +858,12 @@ class PluginTest(unittest.TestCase):
             "first", ["1"], None, library="personal"
         )
 
-    def test_playlist_export_no_local_playlists_does_not_load_items(self):
-        with patch.object(self.lib, "items") as lookup:
+    def test_playlist_export_no_local_playlists_loads_full_library(self):
+        with patch.object(self.lib, "items", wraps=self.lib.items) as lookup:
             self.plugin.sync_playlists(
                 self.lib, self.options(arguments=("--dest=syno",)), []
             )
-        lookup.assert_not_called()
+        lookup.assert_called_once_with([])
         self.client.save_playlist.assert_not_called()
 
     def test_playlist_export_relative_database_paths(self):
@@ -878,14 +878,40 @@ class PluginTest(unittest.TestCase):
             "first", ["1"], None, library="personal"
         )
 
-    def test_playlist_import_caches_paths_across_playlists(self):
+    def test_playlist_import_without_selection_loads_full_library(self):
+        unrelated = Item(path=os.fsencode(os.path.join(self.music, "unrelated.mp3")))
+        self.lib.add(unrelated)
         self.client.playlists.return_value.append(
             self.remote_playlist(name="Other", playlist_id="other")
         )
-        with patch.object(self.lib, "items", wraps=self.lib.items) as lookup:
+        original_items = self.lib.items
+        loaded = []
+
+        def all_items(query):
+            self.assertEqual(query, [])
+            items = list(original_items(query))
+            loaded.extend(item.id for item in items)
+            return items
+
+        with patch.object(self.lib, "items", side_effect=all_items) as lookup:
             self.plugin.sync_playlists(self.lib, self.options(), [])
-        self.assertEqual(lookup.call_count, 2)
+        self.assertCountEqual(loaded, [self.one.id, self.two.id, unrelated.id])
+        lookup.assert_called_once_with([])
         self.assertEqual(self.client.playlist_songs.call_count, 2)
+
+    def test_playlist_without_selection_respects_item_query(self):
+        self.local_playlist("first", [os.fsdecode(self.one.path), os.fsdecode(self.two.path)])
+        for dest in ("beet", "syno"):
+            with self.subTest(dest=dest), patch.object(self.lib, "items", wraps=self.lib.items) as lookup:
+                self.plugin.sync_playlists(
+                    self.lib, self.options(arguments=(f"--dest={dest}", "--force")),
+                    ["title:one"],
+                )
+            lookup.assert_called_once_with(["title:one"])
+        self.assertEqual(self.client.save_playlist.call_args_list, [
+            call("favourites", ["1"], "p1", library="personal"),
+            call("first", ["1"], None, library="personal"),
+        ])
 
     def test_playlist_import_does_not_load_items_before_password_prompt(self):
         opts = self.options(arguments=("-p", "P_alice_favourites", "--pretend"))
