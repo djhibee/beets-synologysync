@@ -17,6 +17,7 @@ from beetsplug._synology import AudioStation, SynologyError, song_path
 from beetsplug._synology_playlists import (
     OwnerAliases,
     decode_name,
+    encode_name,
     is_smart,
     playlist_category,
     playlist_identity,
@@ -813,6 +814,7 @@ class SynologySyncPlugin(BeetsPlugin):
 
     def _local_playlists(self, directory):
         playlists = {}
+        canonical_paths = {}
         if not os.path.isdir(directory):
             return playlists
         for filename in sorted(os.listdir(directory)):
@@ -822,11 +824,12 @@ class SynologySyncPlugin(BeetsPlugin):
             path = os.path.join(directory, filename)
             try:
                 _playlist_name(name)
+                canonical = name
                 if name.startswith(("G_", "P_")):
                     parts = name.split("_", 2)
                     if len(parts) != 3:
                         raise ui.UserError("Invalid encoded playlist filename")
-                    decode_name(parts[2])
+                    canonical = f"{parts[0]}_{parts[1]}_{encode_name(decode_name(parts[2]))}"
             except ui.UserError as exc:
                 raise ui.UserError(f"{exc} (file: {path!r})") from None
             if os.path.commonpath(
@@ -835,6 +838,11 @@ class SynologySyncPlugin(BeetsPlugin):
                 raise ui.UserError(f"Playlist symlink escapes playlist_dir: {path!r}")
             if name in playlists:
                 raise ui.UserError(f"Ambiguous local playlist name: {name} (file: {path!r})")
+            if canonical in canonical_paths:
+                raise ui.UserError(
+                    f"Ambiguous local playlist identity: {canonical_paths[canonical]!r} and {path!r}"
+                )
+            canonical_paths[canonical] = path
             playlists[name] = path
         return playlists
 
@@ -879,15 +887,25 @@ class SynologySyncPlugin(BeetsPlugin):
                         continue
                     stem = aliases.filename(identity)
                     imported[stem] = playlist
-                exact = opts.playlist in imported
+                selection = opts.playlist
+                if selection in local and selection.startswith(("G_", "P_")):
+                    prefix, alias, encoded = selection.split("_", 2)
+                    selection = f"{prefix}_{alias}_{encode_name(decode_name(encoded))}"
+                exact = selection in imported
                 imported = {
                     stem: playlist for stem, playlist in imported.items()
                     if not opts.playlist or (
-                        stem == opts.playlist if exact else playlist["name"] == opts.playlist
+                        stem == selection if exact else playlist["name"] == selection
                     )
                 }
+                canonical_local = {}
+                for stem, path in local.items():
+                    if stem.startswith(("G_", "P_")):
+                        prefix, alias, encoded = stem.split("_", 2)
+                        stem = f"{prefix}_{alias}_{encode_name(decode_name(encoded))}"
+                    canonical_local[stem] = path
                 self._playlists_to_beets(
-                    client, opts, mapping, items, imported, local,
+                    client, opts, mapping, items, imported, canonical_local,
                     directory, base, bool(args),
                 )
             else:

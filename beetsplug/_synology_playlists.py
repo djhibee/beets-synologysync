@@ -9,8 +9,11 @@ from beets import ui
 def encode_name(name):
     if not isinstance(name, str) or not name:
         raise ui.UserError("AudioStation playlist has no name")
-    encoded = quote(name, safe="-_ ").replace(".", "%2E")
-    encoded = encoded.rstrip(" ") + "%20" * (len(encoded) - len(encoded.rstrip(" ")))
+    encoded = quote(name, safe="-_ ")
+    trailing = encoded[len(encoded.rstrip(". ")):]
+    encoded = encoded.rstrip(". ") + "".join(
+        "%2E" if char == "." else "%20" for char in trailing
+    )
     if encoded.startswith(("G_", "P_")):
         encoded = f"%{ord(encoded[0]):02X}" + encoded[1:]
     return encoded
@@ -21,7 +24,12 @@ def decode_name(encoded):
         name = unquote(encoded, encoding="utf-8", errors="strict")
     except UnicodeError:
         raise ui.UserError("Invalid encoded playlist name") from None
-    if encode_name(name) != encoded:
+    canonical = encode_name(name)
+    trailing = re.search(r"(?:%2E|%20)+$", canonical)
+    if (
+        encoded.replace("%2E", ".") != canonical.replace("%2E", ".")
+        or trailing and not encoded.endswith(trailing.group())
+    ):
         raise ui.UserError("Invalid encoded playlist name")
     return name
 

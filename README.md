@@ -283,10 +283,13 @@ Quote usernames containing spaces. Updating a mapping intentionally changes
 the destination identity of every file using that alias; deleting one causes
 those files to require recovery at the next synchronization.
 
-Original names retain underscores; filenames are parsed with only the first two
-underscores as delimiters. UTF-8 percent escaping preserves unsafe characters,
-literal percent signs, dots, trailing spaces, and reserved `G_`/`P_` name
-prefixes. Thus even a name containing `/` can round-trip without creating a
+Original names retain underscores and internal dots; filenames are parsed with
+only the first two underscores as delimiters. UTF-8 percent escaping preserves
+unsafe characters, literal percent signs, trailing dots and spaces, and reserved
+`G_`/`P_` name prefixes. Previously generated `%2E` encodings of internal dots
+remain supported and are reused on import; if both spellings exist for the same
+playlist, synchronization reports the conflicting files rather than guessing.
+Thus even a name containing `/` can round-trip without creating a
 subdirectory. Names exceeding the 255-byte encoded filename limit fail instead
 of being truncated. Do not rename the category/owner prefix unless intentionally
 changing the remote identity.
