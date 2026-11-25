@@ -819,14 +819,22 @@ class SynologySyncPlugin(BeetsPlugin):
             name, extension = os.path.splitext(filename)
             if extension.lower() not in (".m3u", ".m3u8"):
                 continue
-            _playlist_name(name)
             path = os.path.join(directory, filename)
+            try:
+                _playlist_name(name)
+                if name.startswith(("G_", "P_")):
+                    parts = name.split("_", 2)
+                    if len(parts) != 3:
+                        raise ui.UserError("Invalid encoded playlist filename")
+                    decode_name(parts[2])
+            except ui.UserError as exc:
+                raise ui.UserError(f"{exc} (file: {path!r})") from None
             if os.path.commonpath(
                 [os.path.realpath(directory), os.path.realpath(path)]
             ) != os.path.realpath(directory):
-                raise ui.UserError("Playlist symlink escapes playlist_dir")
+                raise ui.UserError(f"Playlist symlink escapes playlist_dir: {path!r}")
             if name in playlists:
-                raise ui.UserError(f"Ambiguous local playlist name: {name}")
+                raise ui.UserError(f"Ambiguous local playlist name: {name} (file: {path!r})")
             playlists[name] = path
         return playlists
 
@@ -840,12 +848,12 @@ class SynologySyncPlugin(BeetsPlugin):
             raise ui.UserError("synologysync.playlist_library must be personal or shared")
         directory, base = self._playlist_settings()
         mapping = self._mapping()
+        local = self._local_playlists(directory)
         items = list(lib.items(ui.decargs(args)))
         selected = {os.path.abspath(os.fsdecode(item.path)): item for item in items}
         if args and not selected:
             self._log.info("No items match the query")
             return
-        local = self._local_playlists(directory)
         aliases = OwnerAliases(lib, pretend=opts.pretend)
         if opts.dest == "beet":
             # The alias namespace spans categories: validate every existing

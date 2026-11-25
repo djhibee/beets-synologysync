@@ -223,6 +223,11 @@ It reads the playlist plugin's `playlist_dir`, `relative_to`, and
 Only accessible, non-smart playlists are imported; existing smart export targets
 are skipped, never overwritten or recreated as normal playlists.
 
+Local playlist filenames are validated before loading beets items or connecting
+to AudioStation, including in pretend mode. Invalid names report the full file
+path. This validation covers all local playlists, even when `-p` selects a
+different playlist.
+
 Imports only request the playlist list and the songs of the selected playlists
 (`Playlist getinfo`); the AudioStation song library is never listed. Exports
 must resolve local files to AudioStation song IDs, which the API cannot look up
