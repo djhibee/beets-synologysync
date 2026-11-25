@@ -825,6 +825,27 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(lookup.call_count, 2)
         self.assertEqual(self.client.playlist_songs.call_count, 2)
 
+    def test_playlist_import_does_not_load_items_before_password_prompt(self):
+        opts = self.options(arguments=("-p", "P_alice_favourites", "--pretend"))
+        with patch.object(self.lib, "items", wraps=self.lib.items) as lookup, \
+                self.assertLogs("beets.synologysync", level="DEBUG") as logs:
+            def password_prompt(prompt):
+                lookup.assert_not_called()
+                messages = [record.getMessage() for record in logs.records]
+                for stage in (
+                    "local playlist filename validation",
+                    "playlist owner alias loading and validation",
+                ):
+                    self.assertTrue(any(
+                        message.startswith(f"Completed {stage} in ")
+                        for message in messages
+                    ))
+                return "secret"
+
+            self.password.side_effect = password_prompt
+            self.plugin.sync_playlists(self.lib, opts, [])
+        self.assertEqual(lookup.call_count, 2)
+
     def test_playlist_import_relative_database_paths(self):
         lib = Library(os.path.join(self.root, "relative.db"), directory=self.music)
         self.addCleanup(lib._close)

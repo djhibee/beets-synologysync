@@ -857,7 +857,8 @@ class SynologySyncPlugin(BeetsPlugin):
             raise ui.UserError("synologysync.playlist_library must be personal or shared")
         directory, base = self._playlist_settings()
         mapping = self._mapping()
-        local = self._local_playlists(directory)
+        with self._debug_stage("local playlist filename validation"):
+            local = self._local_playlists(directory)
         items = []
         if args or opts.dest == "syno":
             with self._debug_stage("playlist beets item query and loading"):
@@ -871,12 +872,13 @@ class SynologySyncPlugin(BeetsPlugin):
         if args and not selected:
             self._log.info("No items match the query")
             return
-        aliases = OwnerAliases(lib, pretend=opts.pretend)
-        if opts.dest == "beet":
-            # The alias namespace spans categories: validate every existing
-            # encoded filename before allocating aliases for incoming owners.
-            for stem in local:
-                aliases.identity(stem, self._prompt_playlist_owner)
+        with self._debug_stage("playlist owner alias loading and validation"):
+            aliases = OwnerAliases(lib, pretend=opts.pretend)
+            if opts.dest == "beet":
+                # The alias namespace spans categories: validate every existing
+                # encoded filename before allocating aliases for incoming owners.
+                for stem in local:
+                    aliases.identity(stem, self._prompt_playlist_owner)
         username = self._username(opts)
         with self._connect(opts) as client:
             remote = {}

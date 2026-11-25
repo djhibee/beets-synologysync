@@ -236,6 +236,8 @@ the selected playlists' songs instead of loading the entire beets library.
 Repeated paths are cached for the duration of the command. With a positional
 query, only its matching items are eligible, as before. Debug logs (`-vvv`)
 report timings for playlist-song fetching and local path lookups.
+Before the password prompt, they also time local filename validation and owner
+alias loading/validation.
 
 Exports
 must resolve local files to AudioStation song IDs, which the API cannot look up
