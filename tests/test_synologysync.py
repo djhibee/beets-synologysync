@@ -1244,6 +1244,37 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(OwnerAliases(self.lib).mappings(), [])
         self.client.save_playlist.assert_not_called()
 
+    def test_invalid_playlist_filename_fails_before_loading_items_or_connecting(self):
+        for filename in (
+            "P_toto_%ZZ.m3u",
+            "G__%FF.m3u8",
+            "P_toto_unescaped.name.m3u",
+            "P_toto_.m3u",
+            "P_incomplete.m3u",
+        ):
+            path = os.path.join(self.playlists, filename)
+            self.plugin._write_playlist(path, self.playlists, [])
+            try:
+                for dest in ("beet", "syno"):
+                    with self.subTest(filename=filename, dest=dest), \
+                            patch.object(self.lib, "items") as items, \
+                            patch("beetsplug.synologysync.ui.input_") as prompt, \
+                            self.assertRaises(ui.UserError) as error:
+                        self.plugin.sync_playlists(
+                            self.lib,
+                            self.options(arguments=(
+                                f"--dest={dest}", "-p", "Calme", "--pretend",
+                            )),
+                            [],
+                        )
+                    self.assertIn(path, str(error.exception))
+                    items.assert_not_called()
+                    prompt.assert_not_called()
+                    self.password.assert_not_called()
+                    self.client_patch.target.AudioStation.assert_not_called()
+            finally:
+                os.unlink(path)
+
     def test_owner_alias_concurrent_allocation_is_unique_and_stable(self):
         other_lib = Library(self.lib.path)
         self.addCleanup(other_lib._close)
