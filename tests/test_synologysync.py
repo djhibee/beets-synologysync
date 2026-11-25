@@ -1248,7 +1248,6 @@ class PluginTest(unittest.TestCase):
         for filename in (
             "P_toto_%ZZ.m3u",
             "G__%FF.m3u8",
-            "P_toto_unescaped.name.m3u",
             "P_toto_.m3u",
             "P_incomplete.m3u",
         ):
@@ -1310,6 +1309,66 @@ class PluginTest(unittest.TestCase):
             self.client.save_playlist.assert_any_call(
                 name, ["1", "2"], str(index), library="personal"
             )
+
+    def test_internal_dots_and_legacy_encoded_dots_roundtrip(self):
+        cases = {
+            "5-stars.quality-lossless": "5-stars.quality-lossless",
+            ".hidden": ".hidden",
+            "a..b": "a..b",
+            "trailing.": "trailing%2E",
+            "trailing. ": "trailing%2E%20",
+            ".": "%2E",
+            "..": "%2E%2E",
+        }
+        for name, encoded in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(encode_name(name), encoded)
+                self.assertEqual(decode_name(encoded), name)
+                legacy = encoded.replace(".", "%2E")
+                self.assertEqual(decode_name(legacy), name)
+        for invalid in ("trailing.", ". ", "%2e", "%ZZ", "%FF"):
+            with self.subTest(invalid=invalid), self.assertRaises(ui.UserError):
+                decode_name(invalid)
+
+    def test_import_reuses_legacy_filename_and_export_decodes_it(self):
+        OwnerAliases(self.lib).alias("alice")
+        path = self.local_playlist("P_alice_favourites%2Erock", [os.fsdecode(self.two.path)])
+        self.client.playlists.return_value = [self.remote_playlist(name="favourites.rock")]
+        self.plugin.sync_playlists(
+            self.lib, self.options(arguments=("-p", "P_alice_favourites%2Erock", "--force")), []
+        )
+        self.assertEqual(
+            self.plugin._read_playlist(path, self.playlists),
+            [os.fsdecode(self.one.path), os.fsdecode(self.two.path)],
+        )
+        self.assertEqual(os.listdir(self.playlists), ["P_alice_favourites%2Erock.m3u"])
+        self.plugin.sync_playlists(
+            self.lib,
+            self.options(arguments=("--dest=syno", "--force", "-p", "P_alice_favourites%2Erock")),
+            [],
+        )
+        self.client.save_playlist.assert_called_once_with(
+            "favourites.rock", ["1", "2"], "p1", library="personal"
+        )
+
+    def test_import_creates_readable_filename_for_internal_dots(self):
+        self.client.playlists.return_value = [self.remote_playlist(name="5-stars.quality-lossless")]
+        self.plugin.sync_playlists(self.lib, self.options(), [])
+        self.assertEqual(os.listdir(self.playlists), ["P_alice_5-stars.quality-lossless.m3u"])
+
+    def test_equivalent_legacy_and_readable_filenames_are_rejected_early(self):
+        first = self.local_playlist("G__5-stars.quality-lossless")
+        second = self.local_playlist("G__5-stars%2Equality-lossless")
+        for dest in ("beet", "syno"):
+            with self.subTest(dest=dest), patch.object(self.lib, "items") as items, \
+                    self.assertRaisesRegex(ui.UserError, "Ambiguous local playlist identity") as error:
+                self.plugin.sync_playlists(
+                    self.lib, self.options(arguments=(f"--dest={dest}", "--pretend")), []
+                )
+            self.assertIn(first, str(error.exception))
+            self.assertIn(second, str(error.exception))
+            items.assert_not_called()
+            self.password.assert_not_called()
 
     def test_overlong_remote_name_is_rejected_not_truncated(self):
         self.client.playlists.return_value = [
